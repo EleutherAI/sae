@@ -12,8 +12,7 @@ from jaxtyping import Float
 from safetensors.torch import save_file
 from torch import nn
 
-from .config import LanguageModelSAERunnerConfig, load_pretrained_sae_lens_sae_components
-
+from .config import SaeConfig, load_pretrained_sae_lens_sae_components
 
 SPARSITY_PATH = "sparsity.safetensors"
 SAE_WEIGHTS_PATH = "sae_weights.safetensors"
@@ -30,7 +29,6 @@ class ForwardOutput(NamedTuple):
 
 
 class SparseAutoencoder(nn.Module):
-
     l1_coefficient: float
     lp_norm: float
     d_sae: int
@@ -44,7 +42,7 @@ class SparseAutoencoder(nn.Module):
 
     def __init__(
         self,
-        cfg: LanguageModelSAERunnerConfig,
+        cfg: SaeConfig,
     ):
         super().__init__()
         self.cfg = cfg
@@ -76,13 +74,6 @@ class SparseAutoencoder(nn.Module):
             self.get_sparsity_loss_term = self.get_sparsity_loss_term_standard
 
         self.initialize_weights()
-
-        # self.hook_sae_in = HookPoint()
-        # self.hook_hidden_pre = HookPoint()
-        # self.hook_hidden_post = HookPoint()
-        # self.hook_sae_out = HookPoint()
-
-        # self.setup()  # Required for `HookedRootModule`s
 
     def initialize_weights(self):
         """
@@ -217,7 +208,6 @@ class SparseAutoencoder(nn.Module):
     def forward(
         self, x: torch.Tensor, dead_neuron_mask: torch.Tensor | None = None
     ) -> ForwardOutput:
-
         feature_acts, hidden_pre = self._encode_with_hidden_pre(x)
         sae_out = self.decode(feature_acts)
 
@@ -313,28 +303,7 @@ class SparseAutoencoder(nn.Module):
             "d_sae, d_sae d_in -> d_sae d_in",
         )
 
-    def save_model_legacy(self, path: str):
-        """
-        Basic save function for the model. Saves the model's state_dict and the config used to train it.
-        """
-
-        # check if path exists
-        folder = os.path.dirname(path)
-        os.makedirs(folder, exist_ok=True)
-
-        state_dict = {"cfg": self.cfg, "state_dict": self.state_dict()}
-
-        if path.endswith(".pt"):
-            torch.save(state_dict, path)
-        else:
-            raise ValueError(
-                f"Unexpected file extension: {path}, supported extensions are .pt and .pkl.gz"
-            )
-
-        print(f"Saved model to {path}")
-
     def save_model(self, path: str, sparsity: Optional[torch.Tensor] = None):
-
         if not os.path.exists(path):
             os.mkdir(path)
 
@@ -361,7 +330,6 @@ class SparseAutoencoder(nn.Module):
     def load_from_pretrained(
         cls, path: str, device: str = "cpu"
     ) -> "SparseAutoencoder":
-
         config_path = os.path.join(path, "cfg.json")
         weight_path = os.path.join(path, "sae_weights.safetensors")
 

@@ -17,7 +17,7 @@ DTYPE_MAP = {
 
 
 @dataclass
-class LanguageModelSAERunnerConfig:
+class SaeConfig:
     """
     Configuration for training a sparse autoencoder on a language model.
     """
@@ -43,7 +43,6 @@ class LanguageModelSAERunnerConfig:
     d_sae: Optional[int] = None
     b_dec_init_method: str = "geometric_median"
     expansion_factor: int = 4
-    activation_fn: str = "relu"  # relu, tanh-relu
     normalize_sae_decoder: bool = True
     noise_scale: float = 0.0
     from_pretrained_path: Optional[str] = None
@@ -139,7 +138,6 @@ class LanguageModelSAERunnerConfig:
     sae_lens_training_version: str = field(default_factory=lambda: __version__)
 
     def __post_init__(self):
-
         if self.resume:
             raise ValueError(
                 "Resuming is no longer supported. You can finetune a trained SAE using cfg.from_pretrained path."
@@ -307,122 +305,6 @@ class LanguageModelSAERunnerConfig:
         return self.total_training_tokens // self.train_batch_size_tokens
 
 
-@dataclass
-class CacheActivationsRunnerConfig:
-    """
-    Configuration for caching activations of an LLM.
-    """
-
-    # Data Generating Function (Model + Training Distibuion)
-    model_name: str = "gelu-2l"
-    model_class_name: str = "HookedTransformer"
-    hook_point: str = "blocks.{layer}.hook_mlp_out"
-    hook_point_layer: int = 0
-    hook_point_head_index: Optional[int] = None
-    dataset_path: str = "NeelNanda/c4-tokenized-2b"
-    streaming: bool = True
-    is_dataset_tokenized: bool = True
-    context_size: int = 128
-    new_cached_activations_path: Optional[str] = (
-        None  # Defaults to "activations/{dataset}/{model}/{full_hook_name}_{hook_point_head_index}"
-    )
-    # dont' specify this since you don't want to load from disk with the cache runner.
-    cached_activations_path: Optional[str] = None
-    # SAE Parameters
-    d_in: int = 512
-
-    # Activation Store Parameters
-    n_batches_in_buffer: int = 20
-    training_tokens: int = 2_000_000
-    store_batch_size_prompts: int = 32
-    train_batch_size_tokens: int = 4096
-    normalize_activations: bool = False
-
-    # Misc
-    device: str | torch.device = "cpu"
-    act_store_device: str | torch.device = (
-        "with_model"  # will be set by post init if with_model
-    )
-    seed: int = 42
-    dtype: str | torch.dtype = "torch.float32"
-    prepend_bos: bool = True
-    autocast_lm: bool = False  # autocast lm during activation fetching
-
-    # Activation caching stuff
-    shuffle_every_n_buffers: int = 10
-    n_shuffles_with_last_section: int = 10
-    n_shuffles_in_entire_dir: int = 10
-    n_shuffles_final: int = 100
-    model_kwargs: dict[str, Any] = field(default_factory=dict)
-    model_from_pretrained_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        # Autofill cached_activations_path unless the user overrode it
-        if self.new_cached_activations_path is None:
-            self.new_cached_activations_path = _default_cached_activations_path(
-                self.dataset_path,
-                self.model_name,
-                self.hook_point,
-                self.hook_point_head_index,
-            )
-
-        if self.act_store_device == "with_model":
-            self.act_store_device = self.device
-
-
-@dataclass
-class ToyModelSAERunnerConfig:
-    # ReLu Model Parameters
-    n_features: int = 5
-    n_hidden: int = 2
-    n_correlated_pairs: int = 0
-    n_anticorrelated_pairs: int = 0
-    feature_probability: float = 0.025
-    model_training_steps: int = 10_000
-
-    # SAE Parameters
-    d_sae: int = 5
-
-    # Training Parameters
-    l1_coefficient: float = 1e-3
-    lr: float = 3e-4
-    train_batch_size: int = 1024
-    b_dec_init_method: str = "geometric_median"
-
-    # Sparsity / Dead Feature Handling
-    use_ghost_grads: bool = (
-        False  # not currently implemented, but SAE class expects it.
-    )
-    feature_sampling_window: int = 100
-    dead_feature_window: int = 100  # unless this window is larger feature sampling,
-    dead_feature_threshold: float = 1e-8
-
-    # Activation Store Parameters
-    total_training_tokens: int = 25_000
-
-    # WANDB
-    log_to_wandb: bool = True
-    wandb_project: str = "mats_sae_training_toy_model"
-    wandb_entity: str | None = None
-    wandb_log_frequency: int = 50
-
-    # Misc
-    device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu"
-    seed: int = 42
-    checkpoint_path: str = "checkpoints"
-    dtype: str | torch.dtype = "float32"
-
-    def __post_init__(self):
-        self.d_in = self.n_hidden  # hidden for the ReLu model is the input for the SAE
-
-        if isinstance(self.dtype, str) and self.dtype not in DTYPE_MAP:
-            raise ValueError(
-                f"dtype must be one of {list(DTYPE_MAP.keys())}. Got {self.dtype}"
-            )
-        elif isinstance(self.dtype, str):
-            self.dtype = DTYPE_MAP[self.dtype]
-
-
 def _default_cached_activations_path(
     dataset_path: str,
     model_name: str,
@@ -466,10 +348,10 @@ class PretokenizeRunnerConfig:
 
 def load_pretrained_sae_lens_sae_components(
     cfg_path: str, weight_path: str, device: str | torch.device | None = None
-) -> tuple[LanguageModelSAERunnerConfig, dict[str, torch.Tensor]]:
+) -> tuple[SaeConfig, dict[str, torch.Tensor]]:
     with open(cfg_path, "r") as f:
         config = json.load(f)
-    var_names = LanguageModelSAERunnerConfig.__init__.__code__.co_varnames
+    var_names = SaeConfig.__init__.__code__.co_varnames
     # filter config for varnames
     config = {k: v for k, v in config.items() if k in var_names}
     config["verbose"] = False
@@ -479,7 +361,7 @@ def load_pretrained_sae_lens_sae_components(
     # loaded, we can inspect the original "sae_lens_version" and apply a conversion function here.
     config["sae_lens_version"] = __version__
 
-    config = LanguageModelSAERunnerConfig(**config)
+    config = SaeConfig(**config)
 
     tensors = {}
     with safe_open(weight_path, framework="pt", device=device) as f:  # type: ignore
