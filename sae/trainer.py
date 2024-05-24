@@ -1,6 +1,6 @@
 import contextlib
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Sized, cast
 
 import torch
 import wandb
@@ -51,12 +51,18 @@ class TrainStepOutput:
 
 
 class SaeTrainer:
-    def __init__(self, cfg: SaeConfig, model: PreTrainedModel):
+    def __init__(self, cfg: SaeConfig, dataset: Dataset, model: PreTrainedModel):
         N = model.config.num_hidden_layers
 
-        self.model = model
-        self.saes = nn.ModuleList([SparseAutoencoder(cfg) for _ in range(N)])
         self.cfg = cfg
+        self.dataset = dataset
+
+        assert isinstance(dataset, Sized)
+        self.num_examples = len(dataset)
+
+        device = model.device
+        self.model = model
+        self.saes = nn.ModuleList([SparseAutoencoder(cfg, device) for _ in range(N)])
 
         self.n_training_steps: int = 0
         self.n_training_tokens: int = 0
@@ -64,23 +70,13 @@ class SaeTrainer:
 
         self.cfg.sae_lens_training_version = __version__
 
-        self.checkpoint_thresholds = []
-        if self.cfg.n_checkpoints > 0:
-            self.checkpoint_thresholds = list(
-                range(
-                    0,
-                    cfg.total_training_tokens,
-                    cfg.total_training_tokens // self.cfg.n_checkpoints,
-                )
-            )[1:]
-
         self.act_freq_scores = torch.zeros(
             cast(int, cfg.d_sae),
-            device=cfg.device,
+            device=device,
         )
         self.n_forward_passes_since_fired = torch.zeros(
             cast(int, cfg.d_sae),
-            device=cfg.device,
+            device=device,
         )
         self.n_frac_active_tokens = 0
         # we don't train the scaling factor (initially)
@@ -104,14 +100,14 @@ class SaeTrainer:
             optimizer=self.optimizer,
             warm_up_steps=cfg.lr_warm_up_steps,
             decay_steps=cfg.lr_decay_steps,
-            training_steps=self.cfg.total_training_steps,
+            training_steps=self.num_examples // cfg.batch_size,
             lr_end=cfg.lr_end,
             num_cycles=cfg.n_restart_cycles,
         )
 
         self.l1_scheduler = L1Scheduler(
             l1_warm_up_steps=cfg.l1_warm_up_steps,  # type: ignore
-            total_steps=self.cfg.total_training_steps,
+            total_steps=self.num_examples // cfg.batch_size,
             final_l1_coefficient=self.cfg.l1_coefficient,
         )
 
@@ -127,21 +123,29 @@ class SaeTrainer:
     def current_l1_coefficient(self) -> float:
         return self.l1_scheduler.current_l1_coefficient
 
-    def fit(self, dataset: Dataset):
+    def fit(self):
+        wandb.init(name=self.cfg.run_name)
+
+        device = self.model.device
         dl = DataLoader(
-            dataset,
-            # batch_size=self.cfg.train_batch_size_tokens,
+            self.dataset,
+            batch_size=self.cfg.batch_size,
             shuffle=True,
         )
         pbar = tqdm(dl, desc="Training")
 
         for batch in pbar:
             # Forward pass on the model to get the next batch of activations
-            hidden_list = self.model(**batch, output_hidden_states=True).hidden_states[1:]
+            with torch.no_grad():
+                hidden_list = self.model(
+                    batch["input_ids"].to(device),
+                    output_hidden_states=True
+                ).hidden_states[1:]
 
-            for hiddens, sae in zip(hidden_list, self.saes):
+            for i, (hiddens, sae) in enumerate(zip(hidden_list, self.saes)):
                 step_output = self._train_step(
-                    assert_type(SparseAutoencoder, sae), hiddens
+                    assert_type(SparseAutoencoder, sae),
+                    hiddens.flatten(0, 1)
                 )
 
                 if self.cfg.log_to_wandb:
@@ -151,6 +155,7 @@ class SaeTrainer:
                                 self._build_train_step_log_dict(
                                     output=step_output,
                                     n_training_tokens=self.n_training_tokens,
+                                    layer=i,
                                 ),
                                 step=self.n_training_steps,
                             )
@@ -172,26 +177,27 @@ class SaeTrainer:
                             # )
                             # self.sae.train()
 
+            self.optimizer.step()
+            if self.cfg.normalize_sae_decoder:
+                for sae in self.saes:
+                    sae.remove_gradient_parallel_to_decoder_directions()
+
+            self.optimizer.zero_grad()
+            self.lr_scheduler.step()
+            self.l1_scheduler.step()
+
             # checkpoint if at checkpoint frequency
-            if (
-                self.checkpoint_thresholds
-                and self.n_training_tokens > self.checkpoint_thresholds[0]
-            ):
-                save_checkpoint(
-                    trainer=self,
-                    checkpoint_name=self.n_training_tokens,
-                )
-                self.checkpoint_thresholds.pop(0)
+            # if (
+            #     self.checkpoint_thresholds
+            #     and self.n_training_tokens > self.checkpoint_thresholds[0]
+            # ):
+            #     save_checkpoint(
+            #         trainer=self,
+            #         checkpoint_name=self.n_training_tokens,
+            #     )
 
             ###############
             self.n_training_steps += 1
-
-            ### If n_training_tokens > sae_group.cfg.training_tokens, then we should switch to fine-tuning (if we haven't already)
-            if (not self.started_fine_tuning) and (
-                self.n_training_tokens > self.cfg.training_tokens
-            ):
-
-                self.begin_finetuning()
 
         # save final sae group to checkpoints folder
         save_checkpoint(
@@ -231,7 +237,7 @@ class SaeTrainer:
 
             self.act_freq_scores = torch.zeros(
                 sparse_autoencoder.cfg.d_sae,  # type: ignore
-                device=sparse_autoencoder.cfg.device,
+                device=sparse_autoencoder.device,
             )
             self.n_frac_active_tokens = 0
 
@@ -241,7 +247,7 @@ class SaeTrainer:
         ).bool()
 
         # Setup autocast if using
-        scaler = torch.cuda.amp.GradScaler(enabled=self.cfg.autocast)
+
         if self.cfg.autocast:
             autocast_if_enabled = torch.autocast(
                 device_type="cuda",
@@ -265,7 +271,7 @@ class SaeTrainer:
                 l1_loss,
                 ghost_grad_loss,
             ) = sparse_autoencoder(
-                sae_in.to(sparse_autoencoder.cfg.device),
+                sae_in.to(sparse_autoencoder.device),
                 ghost_grad_neuron_mask,
             )
 
@@ -276,22 +282,12 @@ class SaeTrainer:
         with torch.no_grad():
             # Calculate the sparsities, and add it to a list, calculate sparsity metrics
             self.act_freq_scores += (feature_acts.abs() > 0).float().sum(0)
-            self.n_frac_active_tokens += self.cfg.train_batch_size_tokens
+            self.n_frac_active_tokens += self.num_examples // self.cfg.batch_size
 
-        # Scaler will rescale gradients if autocast is enabled
-        scaler.scale(loss).backward()  # loss.backward() if not autocasting
-        scaler.unscale_(self.optimizer)  # needed to clip correctly
+        loss.backward()
+
         # TODO: Work out if grad norm clipping should be in config / how to test it.
         torch.nn.utils.clip_grad_norm_(sparse_autoencoder.parameters(), 1.0)
-        scaler.step(self.optimizer)  # just ctx.optimizer.step() if not autocasting
-        scaler.update()
-
-        if sparse_autoencoder.normalize_sae_decoder:
-            sparse_autoencoder.remove_gradient_parallel_to_decoder_directions()
-
-        self.optimizer.zero_grad()
-        self.lr_scheduler.step()
-        self.l1_scheduler.step()
 
         return TrainStepOutput(
             sae_in=sae_in,
@@ -308,6 +304,7 @@ class SaeTrainer:
         self,
         output: TrainStepOutput,
         n_training_tokens: int,
+        layer: int,
     ) -> dict[str, Any]:
         sae_in = output.sae_in
         sae_out = output.sae_out
@@ -330,35 +327,19 @@ class SaeTrainer:
             ghost_grad_loss = ghost_grad_loss.item()
         return {
             # losses
-            "losses/mse_loss": mse_loss.item(),
-            "losses/l1_loss": l1_loss.item()
+            f"mse_loss/layer_{layer}": mse_loss.item(),
+            f"l1_loss/layer_{layer}": l1_loss.item()
             / self.current_l1_coefficient,  # normalize by l1 coefficient
-            "losses/ghost_grad_loss": ghost_grad_loss,
-            "losses/overall_loss": loss.item(),
+            f"ghost_grad_loss/layer_{layer}": ghost_grad_loss,
+            f"overall_loss/layer_{layer}": loss.item(),
             # variance explained
-            "metrics/explained_variance": explained_variance.mean().item(),
-            "metrics/explained_variance_std": explained_variance.std().item(),
-            "metrics/l0": l0.item(),
+            f"explained_variance/layer_{layer}": explained_variance.mean().item(),
+            f"explained_variance_std/layer_{layer}": explained_variance.std().item(),
+            f"l0/layer_{layer}": l0.item(),
             # sparsity
-            "sparsity/mean_passes_since_fired": self.n_forward_passes_since_fired.mean().item(),
-            "sparsity/dead_features": ghost_grad_neuron_mask.sum().item(),
-            "details/current_learning_rate": current_learning_rate,
-            "details/current_l1_coefficient": self.current_l1_coefficient,
-            "details/n_training_tokens": n_training_tokens,
+            # "sparsity/mean_passes_since_fired": self.n_forward_passes_since_fired.mean().item(),
+            # "sparsity/dead_features": ghost_grad_neuron_mask.sum().item(),
+            # "details/current_learning_rate": current_learning_rate,
+            # "details/current_l1_coefficient": self.current_l1_coefficient,
+            # "details/n_training_tokens": n_training_tokens,
         }
-
-    def begin_finetuning(self):
-        self.started_fine_tuning = True
-
-        # finetuning method should be set in the config
-        # if not, then we don't finetune
-        if not isinstance(self.cfg.finetuning_method, str):
-            return
-
-        for name, param in self.saes.named_parameters():
-            if name in FINETUNING_PARAMETERS[self.cfg.finetuning_method]:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        self.finetuning = True

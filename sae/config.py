@@ -22,24 +22,8 @@ class SaeConfig:
     Configuration for training a sparse autoencoder on a language model.
     """
 
-    # Data Generating Function (Model + Training Distibuion)
-    model_name: str = "gelu-2l"
-    model_class_name: str = "HookedTransformer"
-    hook_point: str = "blocks.{layer}.hook_mlp_out"
-    hook_point_eval: str = "blocks.{layer}.attn.pattern"
-    hook_point_layer: int = 0
-    hook_point_head_index: Optional[int] = None
-    dataset_path: str = "NeelNanda/c4-tokenized-2b"
-    streaming: bool = True
-    is_dataset_tokenized: bool = True
-    context_size: int = 128
-    use_cached_activations: bool = False
-    cached_activations_path: Optional[str] = (
-        None  # Defaults to "activations/{dataset}/{model}/{full_hook_name}_{hook_point_head_index}"
-    )
-
     # SAE Parameters
-    d_in: int = 512
+    d_in: int
     d_sae: Optional[int] = None
     b_dec_init_method: str = "geometric_median"
     expansion_factor: int = 4
@@ -51,19 +35,12 @@ class SaeConfig:
     decoder_heuristic_init: bool = False
     init_encoder_as_decoder_transpose: bool = False
 
-    # Activation Store Parameters
-    n_batches_in_buffer: int = 20
-    training_tokens: int = 2_000_000
-    finetuning_tokens: int = 0
-    store_batch_size_prompts: int = 32
-    train_batch_size_tokens: int = 4096
-    normalize_activations: bool = False
+    # Data Generating Function (Model + Training Distibuion)
+    model_name: str = "gelu-2l"
+    is_dataset_tokenized: bool = True
+    context_size: int = 128
 
     # Misc
-    device: str | torch.device = "cpu"
-    act_store_device: str | torch.device = (
-        "with_model"  # will be set by post init if with_model
-    )
     seed: int = 42
     dtype: str | torch.dtype = "torch.float32"  # type: ignore #
     prepend_bos: bool = True
@@ -76,10 +53,8 @@ class SaeConfig:
     compile_sae: bool = False  # use torch.compile on the SAE
     sae_compilation_mode: str | None = None
 
-    # Training Parameters
-
     ## Batch size
-    train_batch_size_tokens: int = 4096
+    batch_size: int = 1
 
     ## Adam
     adam_beta1: float = 0
@@ -101,9 +76,6 @@ class SaeConfig:
     lr_end: Optional[float] = None  # only used for cosine annealing, default is lr / 10
     lr_decay_steps: int = 0
     n_restart_cycles: int = 1  # used only for cosineannealingwarmrestarts
-
-    ## FineTuning
-    finetuning_method: Optional[str] = None  # scale, decoder or unrotated_decoder
 
     # Resampling protocol args
     use_ghost_grads: bool = False  # want to change this to true on some timeline.
@@ -144,22 +116,8 @@ class SaeConfig:
                 + "If you want to load an SAE with resume=True in the config, please manually set resume=False in that config."
             )
 
-        if self.use_cached_activations and self.cached_activations_path is None:
-            self.cached_activations_path = _default_cached_activations_path(
-                self.dataset_path,
-                self.model_name,
-                self.hook_point,
-                self.hook_point_head_index,
-            )
-
         if not isinstance(self.expansion_factor, list):
             self.d_sae = self.d_in * self.expansion_factor
-        self.tokens_per_buffer = (
-            self.train_batch_size_tokens * self.context_size * self.n_batches_in_buffer
-        )
-
-        if self.run_name is None:
-            self.run_name = f"{self.d_sae}-L1-{self.l1_coefficient}-LR-{self.lr}-Tokens-{self.training_tokens:3.3e}"
 
         if self.b_dec_init_method not in ["geometric_median", "mean", "zeros"]:
             raise ValueError(
@@ -183,17 +141,6 @@ class SaeConfig:
         elif isinstance(self.dtype, str):
             self.dtype: torch.dtype = DTYPE_MAP[self.dtype]
 
-        # if we use decoder fine tuning, we can't be applying b_dec to the input
-        if (self.finetuning_method == "decoder") and (self.apply_b_dec_to_input):
-            raise ValueError(
-                "If we are fine tuning the decoder, we can't be applying b_dec to the input.\nSet apply_b_dec_to_input to False."
-            )
-
-        self.device: str | torch.device = torch.device(self.device)
-        if self.act_store_device == "with_model":
-            self.act_store_device = self.device
-        self.act_store_device = torch.device(self.act_store_device)
-
         if self.lr_end is None:
             self.lr_end = self.lr / 10
 
@@ -203,51 +150,6 @@ class SaeConfig:
                 Any, wandb
             ).util.generate_id()  # not sure why this type is erroring
         self.checkpoint_path = f"{self.checkpoint_path}/{unique_id}"
-
-        if self.verbose:
-            print(
-                f"Run name: {self.d_sae}-L1-{self.l1_coefficient}-LR-{self.lr}-Tokens-{self.training_tokens:3.3e}"
-            )
-            # Print out some useful info:
-            n_tokens_per_buffer = (
-                self.store_batch_size_prompts
-                * self.context_size
-                * self.n_batches_in_buffer
-            )
-            print(f"n_tokens_per_buffer (millions): {n_tokens_per_buffer / 10 ** 6}")
-            n_contexts_per_buffer = (
-                self.store_batch_size_prompts * self.n_batches_in_buffer
-            )
-            print(
-                f"Lower bound: n_contexts_per_buffer (millions): {n_contexts_per_buffer / 10 ** 6}"
-            )
-
-            total_training_steps = (
-                self.training_tokens + self.finetuning_tokens
-            ) // self.train_batch_size_tokens
-            print(f"Total training steps: {total_training_steps}")
-
-            total_wandb_updates = total_training_steps // self.wandb_log_frequency
-            print(f"Total wandb updates: {total_wandb_updates}")
-
-            # how many times will we sample dead neurons?
-            # assert self.dead_feature_window <= self.feature_sampling_window, "dead_feature_window must be smaller than feature_sampling_window"
-            n_feature_window_samples = (
-                total_training_steps // self.feature_sampling_window
-            )
-            print(
-                f"n_tokens_per_feature_sampling_window (millions): {(self.feature_sampling_window * self.context_size * self.train_batch_size_tokens) / 10 ** 6}"
-            )
-            print(
-                f"n_tokens_per_dead_feature_window (millions): {(self.dead_feature_window * self.context_size * self.train_batch_size_tokens) / 10 ** 6}"
-            )
-            print(
-                f"We will reset the sparsity calculation {n_feature_window_samples} times."
-            )
-            # print("Number tokens in dead feature calculation window: ", self.dead_feature_window * self.train_batch_size_tokens)
-            print(
-                f"Number tokens in sparsity calculation window: {self.feature_sampling_window * self.train_batch_size_tokens:.2e}"
-            )
 
         if self.use_ghost_grads:
             print("Using Ghost Grads.")
@@ -296,55 +198,6 @@ class SaeConfig:
             print(f"resuming from step {max_step} at path {checkpoint_dir}")
             return mapped_to_steps[max_step]
 
-    @property
-    def total_training_tokens(self) -> int:
-        return self.training_tokens + self.finetuning_tokens
-
-    @property
-    def total_training_steps(self) -> int:
-        return self.total_training_tokens // self.train_batch_size_tokens
-
-
-def _default_cached_activations_path(
-    dataset_path: str,
-    model_name: str,
-    hook_point: str,
-    hook_point_head_index: int | None,
-) -> str:
-    path = f"activations/{dataset_path.replace('/', '_')}/{model_name.replace('/', '_')}/{hook_point}"
-    if hook_point_head_index is not None:
-        path += f"_{hook_point_head_index}"
-    return path
-
-
-@dataclass
-class PretokenizeRunnerConfig:
-    tokenizer_name: str = "gpt2"
-    dataset_path: str = "NeelNanda/c4-10k"
-    split: str | None = "train"
-    data_files: list[str] | None = None
-    data_dir: str | None = None
-    num_proc: int = 4
-    context_size: int = 128
-    column_name: str = "text"
-    shuffle: bool = True
-    seed: int | None = None
-    streaming: bool = False
-
-    # special tokens
-    begin_batch_token: int | Literal["bos", "eos", "sep"] | None = "bos"
-    begin_sequence_token: int | Literal["bos", "eos", "sep"] | None = None
-    sequence_separator_token: int | Literal["bos", "eos", "sep"] | None = "eos"
-
-    # if saving locally, set save_path
-    save_path: str | None = None
-
-    # if saving to huggingface, set hf_repo_id
-    hf_repo_id: str | None = None
-    hf_num_shards: int = 64
-    hf_revision: str = "main"
-    hf_is_private_repo: bool = False
-
 
 def load_pretrained_sae_lens_sae_components(
     cfg_path: str, weight_path: str, device: str | torch.device | None = None
@@ -372,7 +225,7 @@ def load_pretrained_sae_lens_sae_components(
     if "scaling_factor" not in tensors:
         assert isinstance(config.d_sae, int)
         tensors["scaling_factor"] = torch.ones(
-            config.d_sae, dtype=config.dtype, device=config.device
+            config.d_sae, dtype=config.dtype, device=next(iter(tensors.values())).device
         )
 
     return config, tensors

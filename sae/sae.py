@@ -34,15 +34,14 @@ class SparseAutoencoder(nn.Module):
     d_sae: int
     use_ghost_grads: bool
     normalize_sae_decoder: bool
-    hook_point_layer: int
     dtype: torch.dtype
-    device: str | torch.device
     noise_scale: float
     activation_fn: Callable[[torch.Tensor], torch.Tensor]
 
     def __init__(
         self,
         cfg: SaeConfig,
+        device: str | torch.device = "cpu",
     ):
         super().__init__()
         self.cfg = cfg
@@ -52,19 +51,13 @@ class SparseAutoencoder(nn.Module):
                 f"d_in must be an int but was {self.d_in=}; {type(self.d_in)=}"
             )
         assert cfg.d_sae is not None  # keep pyright happy
-        # lists are valid only for SAEGroup cfg, not SAE cfg vals
-        assert (
-            "{layer}" not in cfg.hook_point
-        ), "{layer} must be replaced with the actual layer number in SAE cfg"
 
         self.d_sae = cfg.d_sae
         self.l1_coefficient = cfg.l1_coefficient
         self.lp_norm = cfg.lp_norm
         self.dtype = cfg.dtype
-        self.device = cfg.device
         self.use_ghost_grads = cfg.use_ghost_grads
         self.normalize_sae_decoder = cfg.normalize_sae_decoder
-        self.hook_point_layer = cfg.hook_point_layer
         self.noise_scale = cfg.noise_scale
         self.activation_fn = nn.ReLU()
 
@@ -73,23 +66,15 @@ class SparseAutoencoder(nn.Module):
         else:
             self.get_sparsity_loss_term = self.get_sparsity_loss_term_standard
 
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        """
-        Wrapped around weight initialization code to make init cleaner.
-
-        """
-
         # no config changes encoder bias init for now.
         self.b_enc = nn.Parameter(
-            torch.zeros(self.d_sae, dtype=self.dtype, device=self.device)
+            torch.zeros(self.d_sae, dtype=self.dtype, device=device)
         )
 
         # Start with the default init strategy:
         self.W_dec = nn.Parameter(
             torch.nn.init.kaiming_uniform_(
-                torch.empty(self.d_sae, self.d_in, dtype=self.dtype, device=self.device)
+                torch.empty(self.d_sae, self.d_in, dtype=self.dtype, device=device)
             )
         )
         if self.cfg.decoder_orthogonal_init:
@@ -97,7 +82,7 @@ class SparseAutoencoder(nn.Module):
 
         elif self.cfg.decoder_heuristic_init:
             self.W_dec = nn.Parameter(
-                torch.rand(self.d_sae, self.d_in, dtype=self.dtype, device=self.device)
+                torch.rand(self.d_sae, self.d_in, dtype=self.dtype, device=device)
             )
             self.initialize_decoder_norm_constant_norm()
 
@@ -106,7 +91,7 @@ class SparseAutoencoder(nn.Module):
 
         self.W_enc = nn.Parameter(
             torch.nn.init.kaiming_uniform_(
-                torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=self.device)
+                torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=device)
             )
         )
 
@@ -117,7 +102,7 @@ class SparseAutoencoder(nn.Module):
             self.W_enc = nn.Parameter(
                 torch.nn.init.kaiming_uniform_(
                     torch.empty(
-                        self.d_in, self.d_sae, dtype=self.dtype, device=self.device
+                        self.d_in, self.d_sae, dtype=self.dtype, device=device
                     )
                 )
             )
@@ -129,13 +114,17 @@ class SparseAutoencoder(nn.Module):
 
         # methdods which change b_dec as a function of the dataset are implemented after init.
         self.b_dec = nn.Parameter(
-            torch.zeros(self.d_in, dtype=self.dtype, device=self.device)
+            torch.zeros(self.d_in, dtype=self.dtype, device=device)
         )
 
         # scaling factor for fine-tuning (not to be used in initial training)
         self.scaling_factor = nn.Parameter(
-            torch.ones(self.d_sae, dtype=self.dtype, device=self.device)
+            torch.ones(self.d_sae, dtype=self.dtype, device=device)
         )
+
+    @property
+    def device(self):
+        return self.b_enc.device
 
     def encode(
         self, x: Float[torch.Tensor, "... d_in"]
@@ -149,11 +138,9 @@ class SparseAutoencoder(nn.Module):
         """Encodes input activation tensor x into an SAE feature activation tensor."""
         # move x to correct dtype
         x = x.to(self.dtype)
-        sae_in = self.hook_sae_in(
-            x - (self.b_dec * self.cfg.apply_b_dec_to_input)
-        )  # Remove decoder bias as per Anthropic
+        sae_in = x - (self.b_dec * self.cfg.apply_b_dec_to_input)  # Remove decoder bias as per Anthropic
 
-        hidden_pre = self.hook_hidden_pre(
+        hidden_pre = (
             einops.einsum(
                 sae_in,
                 self.W_enc,
@@ -161,11 +148,12 @@ class SparseAutoencoder(nn.Module):
             )
             + self.b_enc
         )
+
         noisy_hidden_pre = hidden_pre
         if self.noise_scale > 0:
             noise = torch.randn_like(hidden_pre) * self.noise_scale
             noisy_hidden_pre = hidden_pre + noise
-        feature_acts = self.hook_hidden_post(self.activation_fn(noisy_hidden_pre))
+        feature_acts = self.activation_fn(noisy_hidden_pre)
 
         return feature_acts, hidden_pre
 
@@ -173,7 +161,7 @@ class SparseAutoencoder(nn.Module):
         self, feature_acts: Float[torch.Tensor, "... d_sae"]
     ) -> Float[torch.Tensor, "... d_in"]:
         """Decodes SAE feature activation tensor into a reconstructed input activation tensor."""
-        sae_out = self.hook_sae_out(
+        sae_out = (
             einops.einsum(
                 feature_acts
                 * self.scaling_factor,  # need to make sure this handled when loading old models.
@@ -315,8 +303,7 @@ class SparseAutoencoder(nn.Module):
             **self.cfg.__dict__,
             # some args may not be serializable by default
             "dtype": str(self.cfg.dtype),
-            "device": str(self.cfg.device),
-            "act_store_device": str(self.cfg.act_store_device),
+            "device": str(self.device),
         }
 
         with open(f"{path}/{SAE_CFG_PATH}", "w") as f:
@@ -343,7 +330,7 @@ class SparseAutoencoder(nn.Module):
         return sae
 
     def get_name(self):
-        sae_name = f"sparse_autoencoder_{self.cfg.model_name}_{self.cfg.hook_point}_{self.cfg.d_sae}"
+        sae_name = f"sparse_autoencoder_{self.cfg.model_name}_{self.cfg.d_sae}"
         return sae_name
 
     def calculate_ghost_grad_loss(
