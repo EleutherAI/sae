@@ -1,19 +1,12 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 import wandb
 
 from . import __version__
-
-DTYPE_MAP = {
-    "torch.float32": torch.float32,
-    "torch.float64": torch.float64,
-    "torch.float16": torch.float16,
-    "torch.bfloat16": torch.bfloat16,
-}
 
 
 @dataclass
@@ -26,59 +19,33 @@ class SaeConfig:
     d_in: int
     d_sae: Optional[int] = None
     b_dec_init_method: str = "geometric_median"
-    expansion_factor: int = 4
+    expansion_factor: int = 16
     normalize_sae_decoder: bool = True
     noise_scale: float = 0.0
     from_pretrained_path: Optional[str] = None
     apply_b_dec_to_input: bool = True
     decoder_orthogonal_init: bool = False
-    decoder_heuristic_init: bool = False
     init_encoder_as_decoder_transpose: bool = False
-
-    # Data Generating Function (Model + Training Distibuion)
-    model_name: str = "gelu-2l"
-    is_dataset_tokenized: bool = True
-    context_size: int = 128
 
     # Misc
     seed: int = 42
-    dtype: str | torch.dtype = "torch.float32"  # type: ignore #
-    prepend_bos: bool = True
+    dtype: torch.dtype = torch.bfloat16
 
-    # Performance - see compilation section of lm_runner.py for info
-    autocast: bool = False  # autocast to autocast_dtype during training
-    autocast_lm: bool = False  # autocast lm during activation fetching
-    compile_llm: bool = False  # use torch.compile on the LLM
-    llm_compilation_mode: str | None = None  # which torch.compile mode to use
-    compile_sae: bool = False  # use torch.compile on the SAE
-    sae_compilation_mode: str | None = None
+    autocast: bool = True  # autocast to autocast_dtype during training
 
     ## Batch size
     batch_size: int = 1
 
-    ## Adam
-    adam_beta1: float = 0
-    adam_beta2: float = 0.999
-
-    ## Loss Function
-    mse_loss_normalization: Optional[str] = None
-    l1_coefficient: float = 1e-3
+    # From https://transformer-circuits.pub/2024/scaling-monosemanticity/index.html
+    sparsity_weight: float = 0.85
     lp_norm: float = 1
-    scale_sparsity_penalty_by_decoder_norm: bool = False
     l1_warm_up_steps: int = 0
 
     ## Learning Rate Schedule
     lr: float = 3e-4
-    lr_scheduler_name: str = (
-        "constant"  # constant, cosineannealing, cosineannealingwarmrestarts
-    )
-    lr_warm_up_steps: int = 0
-    lr_end: Optional[float] = None  # only used for cosine annealing, default is lr / 10
-    lr_decay_steps: int = 0
-    n_restart_cycles: int = 1  # used only for cosineannealingwarmrestarts
+    lr_warm_up_steps: int = 40
 
     # Resampling protocol args
-    use_ghost_grads: bool = False  # want to change this to true on some timeline.
     feature_sampling_window: int = 2000
     dead_feature_window: int = 1000  # unless this window is larger feature sampling,
 
@@ -90,9 +57,6 @@ class SaeConfig:
 
     # WANDB
     log_to_wandb: bool = True
-    log_activations_store_to_wandb: bool = False
-    log_optimizer_state_to_wandb: bool = False
-    wandb_project: str = "mats_sae_training_language_model"
     wandb_id: Optional[str] = None
     run_name: Optional[str] = None
     wandb_entity: Optional[str] = None
@@ -124,35 +88,12 @@ class SaeConfig:
                 f"b_dec_init_method must be geometric_median, mean, or zeros. Got {self.b_dec_init_method}"
             )
 
-        if self.normalize_sae_decoder and self.decoder_heuristic_init:
-            raise ValueError(
-                "You can't normalize the decoder and use heuristic initialization."
-            )
-
-        if self.normalize_sae_decoder and self.scale_sparsity_penalty_by_decoder_norm:
-            raise ValueError(
-                "Weighting loss by decoder norm makes no sense if you are normalizing the decoder weight norms to 1"
-            )
-
-        if isinstance(self.dtype, str) and self.dtype not in DTYPE_MAP:
-            raise ValueError(
-                f"dtype must be one of {list(DTYPE_MAP.keys())}. Got {self.dtype}"
-            )
-        elif isinstance(self.dtype, str):
-            self.dtype: torch.dtype = DTYPE_MAP[self.dtype]
-
-        if self.lr_end is None:
-            self.lr_end = self.lr / 10
-
         unique_id = self.wandb_id
         if unique_id is None:
             unique_id = cast(
                 Any, wandb
             ).util.generate_id()  # not sure why this type is erroring
         self.checkpoint_path = f"{self.checkpoint_path}/{unique_id}"
-
-        if self.use_ghost_grads:
-            print("Using Ghost Grads.")
 
     def get_checkpoints_by_step(self) -> tuple[dict[int, str], bool]:
         """
