@@ -3,6 +3,7 @@ https://github.com/ArthurConmy/sae/blob/main/sae/model.py
 """
 
 import json
+import math
 import os
 from typing import Callable, NamedTuple, Optional
 
@@ -29,7 +30,6 @@ class ForwardOutput(NamedTuple):
 
 class SparseAutoencoder(nn.Module):
     sparsity_weight: float
-    lp_norm: float
     d_sae: int
     normalize_sae_decoder: bool
     dtype: torch.dtype
@@ -52,7 +52,6 @@ class SparseAutoencoder(nn.Module):
 
         self.d_sae = cfg.d_sae
         self.sparsity_weight = cfg.sparsity_weight
-        self.lp_norm = cfg.lp_norm
         self.dtype = cfg.dtype
         self.normalize_sae_decoder = cfg.normalize_sae_decoder
         self.noise_scale = cfg.noise_scale
@@ -77,7 +76,8 @@ class SparseAutoencoder(nn.Module):
 
         self.W_enc = nn.Parameter(
             torch.nn.init.kaiming_uniform_(
-                torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=device)
+                torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=device),
+                nonlinearity="relu",
             )
         )
 
@@ -87,7 +87,8 @@ class SparseAutoencoder(nn.Module):
         else:
             self.W_enc = nn.Parameter(
                 torch.nn.init.kaiming_uniform_(
-                    torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=device)
+                    torch.empty(self.d_in, self.d_sae, dtype=self.dtype, device=device),
+                    a=math.sqrt(5)
                 )
             )
 
@@ -99,11 +100,6 @@ class SparseAutoencoder(nn.Module):
         # methdods which change b_dec as a function of the dataset are implemented after init.
         self.b_dec = nn.Parameter(
             torch.zeros(self.d_in, dtype=self.dtype, device=device)
-        )
-
-        # scaling factor for fine-tuning (not to be used in initial training)
-        self.scaling_factor = nn.Parameter(
-            torch.ones(self.d_sae, dtype=self.dtype, device=device)
         )
 
     @property
@@ -147,8 +143,7 @@ class SparseAutoencoder(nn.Module):
         """Decodes SAE feature activation tensor into a reconstructed input activation tensor."""
         sae_out = (
             einops.einsum(
-                feature_acts
-                * self.scaling_factor,  # need to make sure this handled when loading old models.
+                feature_acts,
                 self.W_dec,
                 "... d_sae, d_sae d_in -> ... d_in",
             )
@@ -164,9 +159,9 @@ class SparseAutoencoder(nn.Module):
         total_variance = (x - x.mean(0)).pow(2).sum(0)
         fvu = torch.mean(per_token_l2_loss / total_variance)
 
-        sparsity = hoyer_measure(feature_acts).mean()
+        sparsity = torch.norm(feature_acts, p=1, dim=-1).mean()# hoyer_measure(feature_acts).mean()
         sparsity_loss = (self.sparsity_weight * sparsity)
-        loss = (1 - self.sparsity_weight) * fvu + sparsity_loss
+        loss = fvu + sparsity_loss
 
         return ForwardOutput(
             sae_out=sae_out,
@@ -240,7 +235,7 @@ class SparseAutoencoder(nn.Module):
         return sae
 
     def get_name(self):
-        sae_name = f"sparse_autoencoder_{self.cfg.d_sae}"
+        sae_name = f"sae_{self.cfg.d_sae}"
         return sae_name
 
 

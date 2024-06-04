@@ -5,19 +5,20 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from sae import SaeConfig, SaeTrainer
 from sae.data import chunk_and_tokenize
 
+MODEL = "EleutherAI/pythia-160m"
 dataset = Dataset.from_json("/mnt/ssd-1/igor/data/pile/val.jsonl")
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 tokenized = chunk_and_tokenize(dataset, tokenizer)
 
 
 gpt = AutoModelForCausalLM.from_pretrained(
-    "gpt2",
+    MODEL,
     device_map={"": "cuda"},
     torch_dtype=torch.bfloat16,
 )
 
-cfg = SaeConfig(gpt.config.hidden_size, batch_size=128)
+cfg = SaeConfig(gpt.config.hidden_size, batch_size=8)
 trainer = SaeTrainer(cfg, tokenized, gpt)
 
 trainer.fit()
