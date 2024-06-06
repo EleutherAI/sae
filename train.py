@@ -1,12 +1,16 @@
 import torch
-from datasets import Dataset
+from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sae import SaeConfig, SaeTrainer
 from sae.data import chunk_and_tokenize
 
 MODEL = "EleutherAI/pythia-160m"
-dataset = Dataset.from_json("/mnt/ssd-1/igor/data/pile/val.jsonl")
+dataset = load_dataset(
+    "togethercomputer/RedPajama-Data-1T-Sample",
+    split="train",
+    trust_remote_code=True,
+)
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
 tokenized = chunk_and_tokenize(dataset, tokenizer)
