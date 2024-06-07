@@ -1,8 +1,8 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Sized
 
 import torch
-from torch import nn, Tensor
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
@@ -10,15 +10,7 @@ from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 from . import __version__
 from .config import TrainConfig
 from .sae import Sae
-from .utils import assert_type, geometric_median
-
-
-@dataclass
-class TrainStepOutput:
-    sae_in: Tensor
-    sae_out: Tensor
-    feature_acts: Tensor
-    fvu: Tensor
+from .utils import geometric_median
 
 
 class SaeTrainer:
@@ -105,18 +97,30 @@ class SaeTrainer:
                 if pbar.n == 0:
                     sae.b_dec.data = geometric_median(hiddens)
 
-                step_output = self._train_step(assert_type(Sae, sae), hiddens)
-                nonzero_mask = step_output.feature_acts.gt(0).detach()
+                # Make sure the W_dec is still unit-norm
+                if sae.cfg.normalize_decoder:
+                    sae.set_decoder_norm_to_unit_norm()
+
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=torch.bfloat16,
+                    enabled=torch.cuda.is_bf16_supported(),
+                ):
+                    out = sae(hiddens.to(sae.device))
+
+                denom = self.cfg.grad_acc_steps
+                out.fvu.div(denom).backward()
 
                 # Update the did_fire mask
-                did_fire[i] |= nonzero_mask.any(dim=0)
+                fired_indices = out.latent_indices.unique()
+                did_fire[i][fired_indices] = True
 
                 if (
                     self.cfg.log_to_wandb
                     and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
                 ):
                     wandb.log(
-                        {f"fvu/layer_{i}": step_output.fvu.item()},
+                        {f"fvu/layer_{i}": out.fvu.item()},
                         step=self.n_training_steps,
                     )
 
@@ -143,43 +147,16 @@ class SaeTrainer:
                     did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0
 
-        # save final sae group to checkpoints folder
+            if self.n_training_steps % self.cfg.save_every == 0:
+                self.save()
+
+        self.save()
+        pbar.close()
+    
+    def save(self):
+        """Save the SAEs to disk."""
         for i, sae in enumerate(self.saes):
             assert isinstance(sae, Sae)
+
+            # TODO: Make the path configurable
             sae.save_to_disk(f"checkpoints/layer_{i}.pt")
-
-        pbar.close()
-
-    def _train_step(
-        self,
-        sae: Sae,
-        sae_in: Tensor,
-    ) -> TrainStepOutput:
-        sae.train()
-
-        # Make sure the W_dec is still unit-norm
-        if sae.cfg.normalize_decoder:
-            sae.set_decoder_norm_to_unit_norm()
-
-        with torch.autocast(
-            device_type="cuda",
-            dtype=torch.bfloat16,
-            enabled=torch.cuda.is_bf16_supported(),
-        ):
-            (
-                sae_out,
-                feature_acts,
-                fvu,
-            ) = sae(
-                sae_in.to(sae.device),
-            )
-
-        denom = self.cfg.grad_acc_steps
-        fvu.div(denom).backward()
-
-        return TrainStepOutput(
-            sae_in=sae_in,
-            sae_out=sae_out,
-            feature_acts=feature_acts,
-            fvu=fvu,
-        )

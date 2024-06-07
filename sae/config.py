@@ -24,19 +24,25 @@ class SaeConfig(Serializable):
 
 @dataclass
 class TrainConfig(Serializable):
-    # Model config
     sae: SaeConfig
 
     batch_size: int = 8
+    """Batch size measured in sequences."""
+
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
     lr: float = 1e-4
     lr_warm_up_steps: int = 1000
 
-    # AuxK hparams
     auxk_alpha: float = 1 / 32
+    """Weight of the auxiliary loss term."""
+
     dead_feature_threshold: int = 10_000_000
+    """Number of tokens after which a feature is considered dead."""
+
+    save_every: int = 1000
+    """Save SAEs every `save_every` steps."""
 
     log_to_wandb: bool = True
     wandb_id: str | None = None

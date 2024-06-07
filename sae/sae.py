@@ -14,8 +14,15 @@ from .kernels import TritonDecoder
 
 class ForwardOutput(NamedTuple):
     sae_out: Tensor
-    feature_acts: Tensor
+
+    latent_acts: Tensor
+    """Activations of the top-k latents."""
+
+    latent_indices: Tensor
+    """Indices of the top-k features."""
+
     fvu: Tensor
+    """Fraction of variance unexplained."""
 
 
 class Sae(nn.Module):
@@ -97,23 +104,23 @@ class Sae(nn.Module):
         return nn.functional.relu(hidden_pre)
 
     def forward(self, x: Tensor) -> ForwardOutput:
-        feats = self.encode(x)
+        latent_acts = self.encode(x)
 
-        top_vals, top_indices = feats.topk(self.cfg.k, sorted=False)
+        top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
         if self.cfg.naive_decoder:
-            feats = torch.zeros_like(feats).scatter_(
-                dim=-1, index=top_indices, src=top_vals
+            latent_acts = torch.zeros_like(latent_acts).scatter_(
+                dim=-1, index=top_indices, src=top_acts
             )
             sae_out = sae_out = (
                 einops.einsum(
-                    feats,
+                    latent_acts,
                     self.W_dec,
                     "... d_sae, d_sae d_in -> ... d_in",
                 )
                 + self.b_dec
             )
         else:
-            y = TritonDecoder.apply(top_indices, top_vals, self.W_dec.mT)
+            y = TritonDecoder.apply(top_indices, top_acts, self.W_dec.mT)
             sae_out = y + self.b_dec
 
         per_token_l2_loss = (sae_out - x).pow(2).sum(0)
@@ -121,9 +128,10 @@ class Sae(nn.Module):
         fvu = torch.mean(per_token_l2_loss / total_variance)
 
         return ForwardOutput(
-            sae_out=sae_out,
-            feature_acts=feats,
-            fvu=fvu,
+            sae_out,
+            latent_acts,
+            top_indices,
+            fvu,
         )
 
     @torch.no_grad()

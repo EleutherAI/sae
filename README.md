@@ -50,3 +50,13 @@ trainer = SaeTrainer(cfg, tokenized, gpt)
 
 trainer.fit()
 ```
+
+## TODO
+
+There are several features that we'd like to add in the near future:
+- [ ] Implement AuxK loss for preventing dead latents (HIGH PRIORITY)
+- [ ] Support for skipping layers
+- [ ] Support for caching activations
+- [ ] Evaluate SAEs with KL divergence when grafted into the model
+
+If you'd like to help out with any of these, please feel free to open a PR! You can collaborate with us in the sparse-autoencoders channel of the EleutherAI Discord.
