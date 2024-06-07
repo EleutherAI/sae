@@ -17,6 +17,7 @@ dependencies = [
     "simple-parsing",
     "torch",
     "transformers",
+    "triton",
 ]
 version = "0.1.0"
 

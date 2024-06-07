@@ -2,7 +2,7 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sae import SaeConfig, SaeTrainer
+from sae import SaeConfig, SaeTrainer, TrainConfig
 from sae.data import chunk_and_tokenize
 
 MODEL = "EleutherAI/pythia-160m"
@@ -22,7 +22,7 @@ gpt = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
 )
 
-cfg = SaeConfig(gpt.config.hidden_size, batch_size=16)
+cfg = TrainConfig(SaeConfig(gpt.config.hidden_size), batch_size=16)
 trainer = SaeTrainer(cfg, tokenized, gpt)
 
 trainer.fit()

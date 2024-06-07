@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 
 from . import __version__
-from .config import SaeConfig
+from .config import SaeConfig, TrainConfig
 from .sae import Sae
 from .utils import assert_type, geometric_median
 
@@ -22,7 +22,7 @@ class TrainStepOutput:
 
 
 class SaeTrainer:
-    def __init__(self, cfg: SaeConfig, dataset: Dataset, model: PreTrainedModel):
+    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
         N = model.config.num_hidden_layers
 
         self.cfg = cfg
@@ -33,34 +33,24 @@ class SaeTrainer:
 
         device = model.device
         self.model = model
-        self.saes = nn.ModuleList([Sae(cfg, device) for _ in range(N)])
+        self.saes = nn.ModuleList([Sae(cfg.sae, device) for _ in range(N)])
 
         self.n_training_steps: int = 0
         self.n_training_tokens: int = 0
 
-        d = assert_type(int, cfg.d_sae)
-        self.num_tokens_since_fired = torch.zeros(
-            N, d, dtype=torch.long, device=device
-        )
+        d = assert_type(int, cfg.sae.d_sae)
+        self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
-        # The most performant configuration (with good quality output) is 8-bit Adam
-        # while optimizing the SAE entirely in bf16. Regular Adam does not work well
-        # with bf16 weights and gradients.
-        # try:
-        #     from bitsandbytes.optim import Adam8bit as Adam
-        #     print("Using 8-bit Adam from bitsandbytes")
-# 
-        #     if torch.cuda.is_bf16_supported():
-        #         print("Using bfloat16 for training")
-        #     else:
-        #         print("bfloat16 not supported on this device, using float32")
-        # except ImportError:
-        #     from torch.optim import Adam
-        #     print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
-        #     print("Run `pip install bitsandbytes` for less memory usage.")
+        try:
+            from bitsandbytes.optim import Adam8bit as Adam
 
-        #from torch.optim import Adam
-        from bitsandbytes.optim import Adam8bit as Adam
+            print("Using 8-bit Adam from bitsandbytes")
+        except ImportError:
+            from torch.optim import Adam
+
+            print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
+            print("Run `pip install bitsandbytes` for less memory usage.")
+
         self.optimizer = Adam(self.saes.parameters(), lr=cfg.lr)
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer, cfg.lr_warm_up_steps, self.num_examples // cfg.batch_size
@@ -73,6 +63,7 @@ class SaeTrainer:
         if self.cfg.log_to_wandb:
             try:
                 import wandb
+
                 wandb.init(
                     name=self.cfg.run_name, config=asdict(self.cfg), save_code=True
                 )
@@ -113,9 +104,7 @@ class SaeTrainer:
                 if pbar.n == 0:
                     sae.b_dec.data = geometric_median(hiddens)
 
-                step_output = self._train_step(
-                    assert_type(Sae, sae), hiddens
-                )
+                step_output = self._train_step(assert_type(Sae, sae), hiddens)
                 nonzero_mask = step_output.feature_acts.gt(0).detach()
 
                 # Update the did_fire mask
@@ -132,7 +121,7 @@ class SaeTrainer:
 
             # Check if we need to actually do a training step
             if pbar.n % self.cfg.grad_acc_steps == 0:
-                if self.cfg.normalize_decoder:
+                if self.cfg.sae.normalize_decoder:
                     for sae in self.saes:
                         sae.remove_gradient_parallel_to_decoder_directions()
 
@@ -150,7 +139,7 @@ class SaeTrainer:
                     dead_pct = 1.0 - float(did_fire.mean(dtype=torch.float32))
                     pbar.set_postfix_str(f"{dead_pct:.1%} dead")
 
-                    did_fire.zero_()    # reset the mask
+                    did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0
 
         # save final sae group to checkpoints folder
@@ -174,7 +163,7 @@ class SaeTrainer:
         with torch.autocast(
             device_type="cuda",
             dtype=torch.bfloat16,
-            enabled=self.cfg.autocast,
+            enabled=torch.cuda.is_bf16_supported(),
         ):
             (
                 sae_out,
@@ -184,7 +173,7 @@ class SaeTrainer:
                 sae_in.to(sae.device),
             )
 
-        denom = sae.cfg.grad_acc_steps
+        denom = self.cfg.grad_acc_steps
         fvu.div(denom).backward()
 
         return TrainStepOutput(
