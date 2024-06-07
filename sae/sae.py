@@ -23,16 +23,15 @@ class Sae(nn.Module):
 
     def __init__(
         self,
+        d_in: int,
         cfg: SaeConfig,
         device: str | torch.device = "cpu",
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.cfg = cfg
-        self.d_in = cfg.d_in
-
-        assert cfg.d_sae is not None  # keep pyright happy
-        self.d_sae = cfg.d_sae
+        self.d_in = d_in
+        self.d_sae = d_in * cfg.expansion_factor
 
         # no config changes encoder bias init for now.
         self.b_enc = nn.Parameter(torch.zeros(self.d_sae, dtype=dtype, device=device))
@@ -56,9 +55,11 @@ class Sae(nn.Module):
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
-            cfg = SaeConfig(**json.load(f))
+            cfg_dict = json.load(f)
+            d_in = cfg_dict.pop("d_in")
+            cfg = SaeConfig(**cfg_dict)
 
-        sae = Sae(cfg, device=device)
+        sae = Sae(d_in, cfg, device=device)
         load_model(sae, str(path / "sae.safetensors"), device=str(device))
         return sae
 
@@ -68,7 +69,10 @@ class Sae(nn.Module):
 
         save_model(self, str(path / "sae.safetensors"))
         with open(path / "cfg.json", "w") as f:
-            json.dump(self.cfg.to_dict(), f)
+            json.dump({
+                **self.cfg.to_dict(),
+                "d_in": self.d_in,
+            }, f)
 
     @property
     def device(self):
@@ -92,20 +96,6 @@ class Sae(nn.Module):
         )
         return nn.functional.relu(hidden_pre)
 
-    def decode(
-        self, feature_acts: Float[Tensor, "... d_sae"]
-    ) -> Float[Tensor, "... d_in"]:
-        """Decodes SAE feature activation tensor into a reconstructed input activation tensor."""
-        sae_out = (
-            einops.einsum(
-                feature_acts,
-                self.W_dec,
-                "... d_sae, d_sae d_in -> ... d_in",
-            )
-            + self.b_dec
-        )
-        return sae_out
-
     def forward(self, x: Tensor) -> ForwardOutput:
         feats = self.encode(x)
 
@@ -114,7 +104,14 @@ class Sae(nn.Module):
             feats = torch.zeros_like(feats).scatter_(
                 dim=-1, index=top_indices, src=top_vals
             )
-            sae_out = self.decode(feats)
+            sae_out = sae_out = (
+                einops.einsum(
+                    feats,
+                    self.W_dec,
+                    "... d_sae, d_sae d_in -> ... d_in",
+                )
+                + self.b_dec
+            )
         else:
             y = TritonDecoder.apply(top_indices, top_vals, self.W_dec.mT)
             sae_out = y + self.b_dec

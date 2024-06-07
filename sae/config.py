@@ -9,11 +9,6 @@ class SaeConfig(Serializable):
     """
     Configuration for training a sparse autoencoder on a language model.
     """
-
-    # SAE Parameters
-    d_in: int
-    d_sae: int | None = None
-
     expansion_factor: int = 32
     """Multiple of the input dimension to use as the SAE dimension."""
 
@@ -26,17 +21,13 @@ class SaeConfig(Serializable):
     k: int = 50
     """Number of nonzero features."""
 
-    def __post_init__(self):
-        if not isinstance(self.expansion_factor, list):
-            self.d_sae = self.d_in * self.expansion_factor
-
 
 @dataclass
 class TrainConfig(Serializable):
     # Model config
     sae: SaeConfig
 
-    batch_size: int = 1
+    batch_size: int = 8
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 

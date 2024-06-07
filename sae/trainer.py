@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 
 from . import __version__
-from .config import SaeConfig, TrainConfig
+from .config import TrainConfig
 from .sae import Sae
 from .utils import assert_type, geometric_median
 
@@ -23,6 +23,7 @@ class TrainStepOutput:
 
 class SaeTrainer:
     def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
+        d_in = model.config.hidden_size
         N = model.config.num_hidden_layers
 
         self.cfg = cfg
@@ -33,12 +34,12 @@ class SaeTrainer:
 
         device = model.device
         self.model = model
-        self.saes = nn.ModuleList([Sae(cfg.sae, device) for _ in range(N)])
+        self.saes = nn.ModuleList([Sae(d_in, cfg.sae, device) for _ in range(N)])
 
         self.n_training_steps: int = 0
         self.n_training_tokens: int = 0
 
-        d = assert_type(int, cfg.sae.d_sae)
+        d = d_in * cfg.sae.expansion_factor
         self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
         try:
@@ -136,8 +137,8 @@ class SaeTrainer:
                     self.num_tokens_since_fired += num_tokens_in_step
                     self.num_tokens_since_fired[did_fire] = 0
 
-                    dead_pct = 1.0 - float(did_fire.mean(dtype=torch.float32))
-                    pbar.set_postfix_str(f"{dead_pct:.1%} dead")
+                    active_pct = float(did_fire.mean(dtype=torch.float32))
+                    pbar.set_postfix_str(f"{active_pct:.1%} active")
 
                     did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0
