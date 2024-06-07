@@ -40,7 +40,6 @@ class Sae(nn.Module):
         self.d_in = d_in
         self.d_sae = d_in * cfg.expansion_factor
 
-        # no config changes encoder bias init for now.
         self.b_enc = nn.Parameter(torch.zeros(self.d_sae, dtype=dtype, device=device))
         self.W_enc = nn.Parameter(
             torch.nn.init.kaiming_uniform_(

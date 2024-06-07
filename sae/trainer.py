@@ -2,7 +2,9 @@ from dataclasses import asdict
 from typing import Sized
 
 import torch
+import torch.distributed as dist
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
@@ -10,7 +12,7 @@ from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 from . import __version__
 from .config import TrainConfig
 from .sae import Sae
-from .utils import geometric_median
+from .utils import geometric_median, maybe_all_cat, maybe_all_reduce
 
 
 class SaeTrainer:
@@ -22,7 +24,7 @@ class SaeTrainer:
         self.dataset = dataset
 
         assert isinstance(dataset, Sized)
-        self.num_examples = len(dataset)
+        num_examples = len(dataset)
 
         device = model.device
         self.model = model
@@ -46,14 +48,15 @@ class SaeTrainer:
 
         self.optimizer = Adam(self.saes.parameters(), lr=cfg.lr)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warm_up_steps, self.num_examples // cfg.batch_size
+            self.optimizer, cfg.lr_warm_up_steps, num_examples // cfg.batch_size
         )
 
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
         torch.set_float32_matmul_precision("high")
 
-        if self.cfg.log_to_wandb:
+        rank_zero = not dist.is_initialized() or dist.get_rank() == 0
+        if self.cfg.log_to_wandb and rank_zero:
             try:
                 import wandb
 
@@ -74,13 +77,13 @@ class SaeTrainer:
             batch_size=self.cfg.batch_size,
             shuffle=True,
         )
-        pbar = tqdm(dl, desc="Training")
+        pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
         # This mask is zeroed out every training step
         did_fire = torch.zeros_like(self.num_tokens_since_fired, dtype=torch.bool)
         num_tokens_in_step = 0
 
-        for batch in pbar:
+        for i, batch in enumerate(pbar):
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
 
@@ -90,39 +93,53 @@ class SaeTrainer:
                     batch["input_ids"].to(device), output_hidden_states=True
                 ).hidden_states[:-1]
 
-            for i, (hiddens, sae) in enumerate(zip(hidden_list, self.saes)):
+            # 'raw' never has a DDP wrapper
+            for j, (hiddens, raw) in enumerate(zip(hidden_list, self.saes)):
                 hiddens = hiddens.flatten(0, 1)
 
                 # On the first iteration, initialize the decoder bias
-                if pbar.n == 0:
-                    sae.b_dec.data = geometric_median(hiddens)
+                if i == 0:
+                    # NOTE: The all-cat here could conceivably cause an OOM in some
+                    # cases, but it's unlikely to be a problem in practice.
+                    raw.b_dec.data = geometric_median(maybe_all_cat(hiddens))
+
+                    # Wrap the SAEs with Distributed Data Parallel. We have to do this
+                    # after we set the decoder bias, otherwise DDP will not register
+                    # gradients flowing to the bias after the first step.
+                    maybe_wrapped = [
+                        DDP(sae, device_ids=[dist.get_rank()])
+                        for sae in self.saes
+                    ] if dist.is_initialized() else self.saes
 
                 # Make sure the W_dec is still unit-norm
-                if sae.cfg.normalize_decoder:
-                    sae.set_decoder_norm_to_unit_norm()
+                if raw.cfg.normalize_decoder:
+                    raw.set_decoder_norm_to_unit_norm()
 
                 with torch.autocast(
                     device_type="cuda",
                     dtype=torch.bfloat16,
                     enabled=torch.cuda.is_bf16_supported(),
                 ):
-                    out = sae(hiddens.to(sae.device))
+                    wrapped = maybe_wrapped[j]
+                    out = wrapped(hiddens.to(wrapped.device))
 
                 denom = self.cfg.grad_acc_steps
                 out.fvu.div(denom).backward()
 
                 # Update the did_fire mask
-                fired_indices = out.latent_indices.unique()
-                did_fire[i][fired_indices] = True
+                did_fire[j][out.latent_indices.flatten()] = True
+                maybe_all_reduce(did_fire[j], "max")    # max is boolean "any"
 
                 if (
                     self.cfg.log_to_wandb
                     and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
                 ):
-                    wandb.log(
-                        {f"fvu/layer_{i}": out.fvu.item()},
-                        step=self.n_training_steps,
-                    )
+                    global_fvu = maybe_all_reduce(out.fvu)
+                    if rank_zero:
+                        wandb.log(
+                            {f"fvu/layer_{j}": global_fvu.item()},
+                            step=self.n_training_steps,
+                        )
 
             # Check if we need to actually do a training step
             if pbar.n % self.cfg.grad_acc_steps == 0:
@@ -147,7 +164,7 @@ class SaeTrainer:
                     did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0
 
-            if self.n_training_steps % self.cfg.save_every == 0:
+            if rank_zero and (self.n_training_steps + 1) % self.cfg.save_every == 0:
                 self.save()
 
         self.save()

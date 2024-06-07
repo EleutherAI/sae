@@ -54,7 +54,9 @@ trainer.fit()
 ## TODO
 
 There are several features that we'd like to add in the near future:
+- [x] Distributed Data Parallel (HIGH PRIORITY)
 - [ ] Implement AuxK loss for preventing dead latents (HIGH PRIORITY)
+- [ ] Sharding / tensor parallelism for the SAEs (and model too?)
 - [ ] Support for skipping layers
 - [ ] Support for caching activations
 - [ ] Evaluate SAEs with KL divergence when grafted into the model
