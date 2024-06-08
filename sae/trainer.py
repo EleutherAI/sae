@@ -36,6 +36,14 @@ class SaeTrainer:
         d = d_in * cfg.sae.expansion_factor
         self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
+        # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
+        if (lr := cfg.lr) is None:
+            # Base LR is 2e-4 for num latents = 2 ** 14
+            scale = d / (2 ** 14)
+
+            lr = 2e-4 / scale ** 0.5
+            print(f"Auto-selected LR: {lr:.2e}")
+
         try:
             from bitsandbytes.optim import Adam8bit as Adam
 
@@ -46,9 +54,9 @@ class SaeTrainer:
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
-        self.optimizer = Adam(self.saes.parameters(), lr=cfg.lr)
+        self.optimizer = Adam(self.saes.parameters(), lr=lr)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warm_up_steps, num_examples // cfg.batch_size
+            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
 
     def fit(self):
@@ -100,7 +108,10 @@ class SaeTrainer:
                 # On the first iteration, initialize the decoder bias
                 if i == 0:
                     # NOTE: The all-cat here could conceivably cause an OOM in some
-                    # cases, but it's unlikely to be a problem in practice.
+                    # cases, but it's unlikely to be a problem with small world sizes.
+                    # We could avoid this by "approximating" the geometric median
+                    # across all ranks with the mean (median?) of the geometric medians
+                    # on each rank. Not clear if that would hurt performance.
                     raw.b_dec.data = geometric_median(maybe_all_cat(hiddens))
 
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
@@ -121,10 +132,15 @@ class SaeTrainer:
                     enabled=torch.cuda.is_bf16_supported(),
                 ):
                     wrapped = maybe_wrapped[j]
-                    out = wrapped(hiddens.to(wrapped.device))
 
-                denom = self.cfg.grad_acc_steps
-                out.fvu.div(denom).backward()
+                    dead_mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
+                    out = wrapped(
+                        hiddens.to(wrapped.device),
+                        dead_mask=dead_mask if self.cfg.auxk_alpha > 0 else None,
+                    )
+
+                loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                loss.div(self.cfg.grad_acc_steps).backward()
 
                 # Update the did_fire mask
                 did_fire[j][out.latent_indices.flatten()] = True
@@ -134,10 +150,13 @@ class SaeTrainer:
                     self.cfg.log_to_wandb
                     and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
                 ):
-                    global_fvu = maybe_all_reduce(out.fvu)
+                    info = {f"fvu/layer_{j}": maybe_all_reduce(out.fvu).item()}
+                    if self.cfg.auxk_alpha > 0:
+                        info[f"auxk/layer_{j}"] = maybe_all_reduce(out.auxk_loss).item()
+
                     if rank_zero:
                         wandb.log(
-                            {f"fvu/layer_{j}": global_fvu.item()},
+                            info,
                             step=self.n_training_steps,
                         )
 

@@ -4,7 +4,7 @@ from typing import NamedTuple
 
 import einops
 import torch
-from jaxtyping import Float
+from jaxtyping import Float, Int64
 from safetensors.torch import load_model, save_model
 from torch import nn, Tensor
 
@@ -23,6 +23,9 @@ class ForwardOutput(NamedTuple):
 
     fvu: Tensor
     """Fraction of variance unexplained."""
+
+    auxk_loss: float | Tensor
+    """AuxK loss, if applicable."""
 
 
 class Sae(nn.Module):
@@ -47,13 +50,12 @@ class Sae(nn.Module):
                 nonlinearity="relu",
             )
         )
-        # Clone first and then transpose so that it's contiguous when transposed again
+        # Needs to be contiguous for the Triton kernel
         self.W_dec = nn.Parameter(self.W_enc.data.mT.contiguous())
 
         if self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
-        # methods which change b_dec as a function of the dataset are implemented after init.
         self.b_dec = nn.Parameter(torch.zeros(self.d_in, dtype=dtype, device=device))
 
     @staticmethod
@@ -101,36 +103,58 @@ class Sae(nn.Module):
             + self.b_enc
         )
         return nn.functional.relu(hidden_pre)
+    
+    def decode(
+        self,
+        top_acts: Float[Tensor, "... d_sae"],
+        top_indices: Int64[Tensor, "..."],
+    ) -> Float[Tensor, "... d_in"]:
+        y = TritonDecoder.apply(top_indices, top_acts, self.W_dec.mT)
+        return y + self.b_dec
 
-    def forward(self, x: Tensor) -> ForwardOutput:
+    def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
         latent_acts = self.encode(x)
-
         top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
-        if self.cfg.naive_decoder:
-            latent_acts = torch.zeros_like(latent_acts).scatter_(
-                dim=-1, index=top_indices, src=top_acts
-            )
-            sae_out = sae_out = (
-                einops.einsum(
-                    latent_acts,
-                    self.W_dec,
-                    "... d_sae, d_sae d_in -> ... d_in",
-                )
-                + self.b_dec
-            )
-        else:
-            y = TritonDecoder.apply(top_indices, top_acts, self.W_dec.mT)
-            sae_out = y + self.b_dec
 
-        per_token_l2_loss = (sae_out - x).pow(2).sum(0)
+        # Decode and compute residual
+        sae_out = self.decode(top_acts, top_indices)
+        e = sae_out - x
+
+        # Used as a denominator for putting everything on a reasonable scale
         total_variance = (x - x.mean(0)).pow(2).sum(0)
-        fvu = torch.mean(per_token_l2_loss / total_variance)
+
+        # Second decoder pass for AuxK loss
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            # Heuristic from Appendix B.1 in the paper
+            k_aux = x.shape[-1] // 2
+
+            # Reduce the scale of the loss if there are a small number of dead latents
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            # Don't include living latents in this loss
+            auxk_latents = torch.where(dead_mask[None], latent_acts, -torch.inf)
+
+            # Top-k dead latents
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+
+            # Encourage the top ~50% of dead latents to predict the residual of the
+            # top k living latents
+            e_hat = self.decode(auxk_acts, auxk_indices)
+            auxk_loss = (e_hat - e).pow(2).sum(0)
+            auxk_loss = scale * torch.mean(auxk_loss / total_variance)
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum(0)
+        fvu = torch.mean(l2_loss / total_variance)
 
         return ForwardOutput(
             sae_out,
-            latent_acts,
+            top_acts,
             top_indices,
             fvu,
+            auxk_loss,
         )
 
     @torch.no_grad()
@@ -141,10 +165,6 @@ class Sae(nn.Module):
 
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):
-        """
-        Update grads so that they remove the parallel component
-            (d_sae, d_in) shape
-        """
         assert self.W_dec.grad is not None  # keep pyright happy
 
         parallel_component = einops.einsum(

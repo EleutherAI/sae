@@ -15,9 +15,6 @@ class SaeConfig(Serializable):
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
 
-    naive_decoder: bool = False
-    """Use naive PyTorch decoder instead of the optimized Triton one."""
-
     k: int = 50
     """Number of nonzero features."""
 
@@ -32,9 +29,11 @@ class TrainConfig(Serializable):
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
-    lr: float = 1e-4
-    lr_warm_up_steps: int = 1000
+    lr: float | None = None
+    """Base LR. If None, it is automatically chosen based on the number of latents."""
 
+    lr_warmup_steps: int = 1000
+ 
     auxk_alpha: float = 1 / 32
     """Weight of the auxiliary loss term."""
 
