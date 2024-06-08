@@ -18,8 +18,15 @@ from .utils import geometric_median, maybe_all_cat, maybe_all_reduce
 class SaeTrainer:
     def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
         d_in = model.config.hidden_size
-        N = model.config.num_hidden_layers
 
+        # If no layers are specified, train on all of them
+        if not cfg.layers:
+            N = model.config.num_hidden_layers
+            cfg.layers = list(range(0, N, cfg.layer_stride))
+
+            print(f"Training on layers: {cfg.layers}")
+
+        N = len(cfg.layers)
         self.cfg = cfg
         self.dataset = dataset
 
@@ -39,9 +46,9 @@ class SaeTrainer:
         # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
         if (lr := cfg.lr) is None:
             # Base LR is 1e-4 for num latents = 2 ** 13
-            scale = d / (2 ** 13)
+            scale = d / (2 ** 14)
 
-            lr = 1e-4 / scale ** 0.5
+            lr = 2e-4 / scale ** 0.5
             print(f"Auto-selected LR: {lr:.2e}")
 
         try:
@@ -102,6 +109,9 @@ class SaeTrainer:
                     batch["input_ids"].to(device), output_hidden_states=True
                 ).hidden_states[:-1]
 
+                # Only keep the layers we care about
+                hidden_list = [hidden_list[i] for i in self.cfg.layers]
+
             # 'raw' never has a DDP wrapper
             for j, (hiddens, raw) in enumerate(zip(hidden_list, self.saes)):
                 hiddens = hiddens.flatten(0, 1)
@@ -151,13 +161,14 @@ class SaeTrainer:
                     and pbar.n % self.cfg.grad_acc_steps == 0
                     and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
                 ):
+                    layer_idx = self.cfg.layers[j]
                     info = {
-                        f"fvu/layer_{j}": maybe_all_reduce(out.fvu).item(),
-                        f"dead_pct/layer_{j}": mask.mean(dtype=torch.float32).item(),
-                        f"grad_norm/layer_{j}": grad_norm.item(),
+                        f"fvu/layer_{layer_idx}": maybe_all_reduce(out.fvu).item(),
+                        f"dead_pct/layer_{layer_idx}": mask.mean(dtype=torch.float32).item(),
+                        f"grad_norm/layer_{layer_idx}": grad_norm.item(),
                     }
                     if self.cfg.auxk_alpha > 0:
-                        info[f"auxk/layer_{j}"] = maybe_all_reduce(out.auxk_loss).item()
+                        info[f"auxk/layer_{layer_idx}"] = maybe_all_reduce(out.auxk_loss).item()
 
                     if rank_zero:
                         wandb.log(
@@ -196,5 +207,5 @@ class SaeTrainer:
         for i, sae in enumerate(self.saes):
             assert isinstance(sae, Sae)
 
-            # TODO: Make the path configurable
-            sae.save_to_disk(f"checkpoints/layer_{i}.pt")
+            path = self.cfg.run_name or "checkpoints"
+            sae.save_to_disk(f"{path}/layer_{i}.pt")

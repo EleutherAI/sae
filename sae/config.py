@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from simple_parsing import Serializable
+from simple_parsing import list_field, Serializable
 
 from . import __version__
 
@@ -15,7 +15,7 @@ class SaeConfig(Serializable):
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
 
-    k: int = 50
+    k: int = 32
     """Number of nonzero features."""
 
 
@@ -40,12 +40,18 @@ class TrainConfig(Serializable):
     dead_feature_threshold: int = 10_000_000
     """Number of tokens after which a feature is considered dead."""
 
+    layers: list[int] = list_field()
+    """List of layer indices to train SAEs on."""
+
+    layer_stride: int = 1
+    """Stride between layers to train SAEs on."""
+
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 
     log_to_wandb: bool = True
-    wandb_id: str | None = None
     run_name: str | None = None
-    wandb_entity: str | None = None
     wandb_log_frequency: int = 10
-    eval_every_n_wandb_logs: int = 100  # logs every 1000 steps.
+
+    def __post_init__(self):
+        assert not (self.layers and self.layer_stride != 1), "Cannot specify both `layers` and `layer_stride`."
