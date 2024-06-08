@@ -29,8 +29,6 @@ class ForwardOutput(NamedTuple):
 
 
 class Sae(nn.Module):
-    d_sae: int
-
     def __init__(
         self,
         d_in: int,
@@ -41,22 +39,17 @@ class Sae(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        self.d_sae = d_in * cfg.expansion_factor
+        d_sae = d_in * cfg.expansion_factor
 
-        self.b_enc = nn.Parameter(torch.zeros(self.d_sae, dtype=dtype, device=device))
-        self.W_enc = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(
-                torch.empty(self.d_in, self.d_sae, dtype=dtype, device=device),
-                nonlinearity="relu",
-            )
-        )
-        # Needs to be contiguous for the Triton kernel
-        self.W_dec = nn.Parameter(self.W_enc.data.mT.contiguous())
+        self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
+        self.encoder.bias.data.zero_()
+        self.encoder.weight.data *= 0.1    # Small init means FVU starts below 1.0
 
+        self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
         if self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
-        self.b_dec = nn.Parameter(torch.zeros(self.d_in, dtype=dtype, device=device))
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
     @staticmethod
     def load_from_disk(path: Path | str, device: str | torch.device = "cpu") -> "Sae":
@@ -84,32 +77,24 @@ class Sae(nn.Module):
 
     @property
     def device(self):
-        return self.b_enc.device
+        return self.b_dec.device
 
     @property
     def dtype(self):
-        return self.b_enc.dtype
+        return self.b_dec.dtype
 
     def encode(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
-        x = x.to(self.dtype)
-        sae_in = x - self.b_dec  # Remove decoder bias as per Anthropic
+        # Remove decoder bias as per Anthropic
+        sae_in = x.to(self.dtype) - self.b_dec
 
-        hidden_pre = (
-            einops.einsum(
-                sae_in,
-                self.W_enc,
-                "... d_in, d_in d_sae -> ... d_sae",
-            )
-            + self.b_enc
-        )
-        return nn.functional.relu(hidden_pre)
-    
+        return nn.functional.relu(self.encoder(sae_in))
+
     def decode(
         self,
         top_acts: Float[Tensor, "... d_sae"],
         top_indices: Int64[Tensor, "..."],
     ) -> Float[Tensor, "... d_in"]:
-        y = TritonDecoder.apply(top_indices, top_acts, self.W_dec.mT)
+        y = TritonDecoder.apply(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:

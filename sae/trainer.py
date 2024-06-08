@@ -38,10 +38,10 @@ class SaeTrainer:
 
         # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
         if (lr := cfg.lr) is None:
-            # Base LR is 2e-4 for num latents = 2 ** 14
-            scale = d / (2 ** 14)
+            # Base LR is 1e-4 for num latents = 2 ** 13
+            scale = d / (2 ** 13)
 
-            lr = 2e-4 / scale ** 0.5
+            lr = 1e-4 / scale ** 0.5
             print(f"Auto-selected LR: {lr:.2e}")
 
         try:
@@ -73,6 +73,7 @@ class SaeTrainer:
                 )
             except ImportError:
                 print("Weights & Biases not installed, skipping logging.")
+                self.cfg.log_to_wandb = False
 
         num_sae_params = sum(p.numel() for p in self.saes.parameters())
         num_model_params = sum(p.numel() for p in self.model.parameters())
@@ -112,7 +113,8 @@ class SaeTrainer:
                     # We could avoid this by "approximating" the geometric median
                     # across all ranks with the mean (median?) of the geometric medians
                     # on each rank. Not clear if that would hurt performance.
-                    raw.b_dec.data = geometric_median(maybe_all_cat(hiddens))
+                    median = geometric_median(maybe_all_cat(hiddens))
+                    raw.b_dec.data = median.to(raw.dtype)
 
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
                     # after we set the decoder bias, otherwise DDP will not register
@@ -126,21 +128,19 @@ class SaeTrainer:
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
 
-                with torch.autocast(
-                    device_type="cuda",
-                    dtype=torch.bfloat16,
-                    enabled=torch.cuda.is_bf16_supported(),
-                ):
-                    wrapped = maybe_wrapped[j]
+                wrapped = maybe_wrapped[j]
 
-                    dead_mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
-                    out = wrapped(
-                        hiddens.to(wrapped.device),
-                        dead_mask=dead_mask if self.cfg.auxk_alpha > 0 else None,
-                    )
+                mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
+                out = wrapped(
+                    hiddens,
+                    dead_mask=mask if self.cfg.auxk_alpha > 0 else None,
+                )
 
                 loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                 loss.div(self.cfg.grad_acc_steps).backward()
+
+                # Clip gradient norm independently for each SAE
+                grad_norm = torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
                 # Update the did_fire mask
                 did_fire[j][out.latent_indices.flatten()] = True
@@ -148,9 +148,14 @@ class SaeTrainer:
 
                 if (
                     self.cfg.log_to_wandb
+                    and pbar.n % self.cfg.grad_acc_steps == 0
                     and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
                 ):
-                    info = {f"fvu/layer_{j}": maybe_all_reduce(out.fvu).item()}
+                    info = {
+                        f"fvu/layer_{j}": maybe_all_reduce(out.fvu).item(),
+                        f"dead_pct/layer_{j}": mask.mean(dtype=torch.float32).item(),
+                        f"grad_norm/layer_{j}": grad_norm.item(),
+                    }
                     if self.cfg.auxk_alpha > 0:
                         info[f"auxk/layer_{j}"] = maybe_all_reduce(out.auxk_loss).item()
 
@@ -176,9 +181,6 @@ class SaeTrainer:
                 with torch.no_grad():
                     self.num_tokens_since_fired += num_tokens_in_step
                     self.num_tokens_since_fired[did_fire] = 0
-
-                    active_pct = float(did_fire.mean(dtype=torch.float32))
-                    pbar.set_postfix_str(f"{active_pct:.1%} active")
 
                     did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0

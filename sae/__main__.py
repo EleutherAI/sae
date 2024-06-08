@@ -49,11 +49,8 @@ def run():
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         device_map={"": "cuda"},
-        torch_dtype="auto",
+        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else "auto",
     )
-
-    if rank == 0:
-        print(f"Training on '{args.dataset}' (split '{args.split}')")
 
     dataset = load_dataset(
         args.dataset,
@@ -70,6 +67,9 @@ def run():
 
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
+        print(f"Training on '{args.dataset}' (split '{args.split}')")
+        print(f"Storing model weights in {model.dtype}")
+
         trainer = SaeTrainer(args, tokenized, model)
         trainer.fit()
 
