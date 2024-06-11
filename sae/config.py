@@ -49,6 +49,12 @@ class TrainConfig(Serializable):
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 
+    hf_token: str | None = None
+    """Huggingface API token for downloading models."""
+
+    load_in_8bit: bool = False
+    """Load the model in 8-bit mode."""
+
     log_to_wandb: bool = True
     run_name: str | None = None
     wandb_log_frequency: int = 10

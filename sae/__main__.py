@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from datasets import load_dataset
 from simple_parsing import field, parse
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from .data import chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
@@ -46,10 +46,20 @@ def run():
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
 
     args = parse(RunConfig)
+    if args.load_in_8bit:
+        dtype = torch.float16
+    elif torch.cuda.is_bf16_supported():
+        dtype = torch.bfloat16
+    else:
+        dtype = "auto"
+
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        device_map={"": "cuda"},
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else "auto",
+        attn_implementation="sdpa",
+        device_map={"": f"cuda:{rank}"},
+        quantization_config=BitsAndBytesConfig(load_in_8bit=args.load_in_8bit),
+        torch_dtype=dtype,
+        token=args.hf_token,
     )
 
     dataset = load_dataset(
