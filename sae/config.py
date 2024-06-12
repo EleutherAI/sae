@@ -57,7 +57,7 @@ class TrainConfig(Serializable):
 
     log_to_wandb: bool = True
     run_name: str | None = None
-    wandb_log_frequency: int = 10
+    wandb_log_frequency: int = 1
 
     def __post_init__(self):
         assert not (self.layers and self.layer_stride != 1), "Cannot specify both `layers` and `layer_stride`."

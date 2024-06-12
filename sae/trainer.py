@@ -37,9 +37,6 @@ class SaeTrainer:
         self.model = model
         self.saes = nn.ModuleList([Sae(d_in, cfg.sae, device) for _ in range(N)])
 
-        self.n_training_steps: int = 0
-        self.n_training_tokens: int = 0
-
         d = d_in * cfg.sae.expansion_factor
         self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
@@ -99,6 +96,10 @@ class SaeTrainer:
         did_fire = torch.zeros_like(self.num_tokens_since_fired, dtype=torch.bool)
         num_tokens_in_step = 0
 
+        # For logging purposes
+        avg_auxk_loss = torch.zeros(len(self.saes), device=device)
+        avg_fvu = torch.zeros(len(self.saes), device=device)
+
         for i, batch in enumerate(pbar):
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
@@ -139,12 +140,19 @@ class SaeTrainer:
                     raw.set_decoder_norm_to_unit_norm()
 
                 wrapped = maybe_wrapped[j]
-
-                mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
                 out = wrapped(
                     hiddens,
-                    dead_mask=mask if self.cfg.auxk_alpha > 0 else None,
+                    dead_mask=(
+                        self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
+                        if self.cfg.auxk_alpha > 0
+                        else None
+                    ),
                 )
+
+                denom = self.cfg.grad_acc_steps * self.cfg.wandb_log_frequency
+                avg_fvu[j] += maybe_all_reduce(out.fvu.detach()) / denom
+                if self.cfg.auxk_alpha > 0:
+                    avg_auxk_loss[j] += maybe_all_reduce(out.auxk_loss.detach()) / denom
 
                 loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                 loss.div(self.cfg.grad_acc_steps).backward()
@@ -156,28 +164,9 @@ class SaeTrainer:
                 did_fire[j][out.latent_indices.flatten()] = True
                 maybe_all_reduce(did_fire[j], "max")    # max is boolean "any"
 
-                if (
-                    self.cfg.log_to_wandb
-                    and pbar.n % self.cfg.grad_acc_steps == 0
-                    and (self.n_training_steps + 1) % self.cfg.wandb_log_frequency == 0
-                ):
-                    layer_idx = self.cfg.layers[j]
-                    info = {
-                        f"fvu/layer_{layer_idx}": maybe_all_reduce(out.fvu).item(),
-                        f"dead_pct/layer_{layer_idx}": mask.mean(dtype=torch.float32).item(),
-                        f"grad_norm/layer_{layer_idx}": grad_norm.item(),
-                    }
-                    if self.cfg.auxk_alpha > 0:
-                        info[f"auxk/layer_{layer_idx}"] = maybe_all_reduce(out.auxk_loss).item()
-
-                    if rank_zero:
-                        wandb.log(
-                            info,
-                            step=self.n_training_steps,
-                        )
-
             # Check if we need to actually do a training step
-            if pbar.n % self.cfg.grad_acc_steps == 0:
+            step, substep = divmod(i, self.cfg.grad_acc_steps)
+            if substep == 0:
                 if self.cfg.sae.normalize_decoder:
                     for sae in self.saes:
                         sae.remove_gradient_parallel_to_decoder_directions()
@@ -187,8 +176,6 @@ class SaeTrainer:
                 self.lr_scheduler.step()
 
                 ###############
-                self.n_training_steps += 1
-
                 with torch.no_grad():
                     self.num_tokens_since_fired += num_tokens_in_step
                     self.num_tokens_since_fired[did_fire] = 0
@@ -196,7 +183,27 @@ class SaeTrainer:
                     did_fire.zero_()  # reset the mask
                     num_tokens_in_step = 0
 
-            if rank_zero and (self.n_training_steps + 1) % self.cfg.save_every == 0:
+                if self.cfg.log_to_wandb and (step + 1) % self.cfg.wandb_log_frequency == 0:
+                    info = {}
+
+                    for j in range(len(self.saes)):
+                        mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
+                        layer_idx = self.cfg.layers[j]
+
+                        info.update({
+                            f"fvu/layer_{layer_idx}": avg_fvu[j].item(),
+                            f"dead_pct/layer_{layer_idx}": mask.mean(dtype=torch.float32).item(),
+                        })
+                        if self.cfg.auxk_alpha > 0:
+                            info[f"auxk/layer_{layer_idx}"] = avg_auxk_loss[j].item()
+
+                    avg_auxk_loss.zero_()
+                    avg_fvu.zero_()
+
+                    if rank_zero:
+                        wandb.log(info, step=step)
+
+            if rank_zero and (step + 1) % self.cfg.save_every == 0:
                 self.save()
 
         self.save()
@@ -204,7 +211,7 @@ class SaeTrainer:
     
     def save(self):
         """Save the SAEs to disk."""
-        for i, sae in enumerate(self.saes):
+        for i, sae in zip(self.cfg.layers, self.saes):
             assert isinstance(sae, Sae)
 
             path = self.cfg.run_name or "checkpoints"

@@ -24,7 +24,7 @@ class ForwardOutput(NamedTuple):
     fvu: Tensor
     """Fraction of variance unexplained."""
 
-    auxk_loss: float | Tensor
+    auxk_loss: Tensor
     """AuxK loss, if applicable."""
 
 
