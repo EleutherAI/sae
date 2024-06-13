@@ -24,8 +24,6 @@ class SaeTrainer:
         if not cfg.layers:
             N = model.config.num_hidden_layers
             cfg.layers = list(range(0, N, cfg.layer_stride))
-
-            print(f"Training on layers: {cfg.layers}")
         
         self.cfg = cfg
         self.dataset = dataset
@@ -254,6 +252,7 @@ class SaeTrainer:
         """Prepare a plan for distributing layers across ranks."""
         if not self.cfg.distribute_layers:
             self.layer_plan = {}
+            print(f"Training on layers: {self.cfg.layers}")
             return
 
         layers_per_rank, rem = divmod(len(self.cfg.layers), dist.get_world_size())

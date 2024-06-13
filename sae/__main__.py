@@ -4,9 +4,11 @@ import os
 
 import torch
 import torch.distributed as dist
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
+)
 
 from .data import chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
@@ -39,19 +41,7 @@ class RunConfig(TrainConfig):
     """Load the model in 8-bit mode."""
 
 
-def run():
-    local_rank = os.environ.get("LOCAL_RANK")
-    ddp = local_rank is not None
-    rank = int(local_rank) if ddp else 0
-
-    if ddp:
-        torch.cuda.set_device(int(local_rank))
-        dist.init_process_group("nccl")
-
-        if rank == 0:
-            print(f"Using DDP across {dist.get_world_size()} GPUs.")
-
-    args = parse(RunConfig)
+def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -79,18 +69,40 @@ def run():
         trust_remote_code=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+    dataset = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len)
 
-    # TODO: Only do the chunking and tokenization on rank 0
-    tokenized = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len)
+    return model, dataset
+
+
+def run():
+    local_rank = os.environ.get("LOCAL_RANK")
+    ddp = local_rank is not None
+    rank = int(local_rank) if ddp else 0
+
     if ddp:
-        tokenized = tokenized.shard(dist.get_world_size(), rank)
+        torch.cuda.set_device(int(local_rank))
+        dist.init_process_group("nccl")
+
+        if rank == 0:
+            print(f"Using DDP across {dist.get_world_size()} GPUs.")
+
+    args = parse(RunConfig)
+
+    # Awkward hack to prevent other ranks from duplicating data preprocessing
+    if not ddp or rank == 0:
+        model, dataset = load_artifacts(args, rank)
+    if ddp:
+        dist.barrier()
+        if rank != 0:
+            model, dataset = load_artifacts(args, rank)
+        dataset = dataset.shard(dist.get_world_size(), rank)
 
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = SaeTrainer(args, tokenized, model)
+        trainer = SaeTrainer(args, dataset, model)
         trainer.fit()
 
 
