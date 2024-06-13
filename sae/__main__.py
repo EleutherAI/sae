@@ -32,6 +32,12 @@ class RunConfig(TrainConfig):
     ctx_len: int = 2048
     """Context length to use for training."""
 
+    hf_token: str | None = None
+    """Huggingface API token for downloading models."""
+
+    load_in_8bit: bool = False
+    """Load the model in 8-bit mode."""
+
 
 def run():
     local_rank = os.environ.get("LOCAL_RANK")
@@ -57,7 +63,11 @@ def run():
         args.model,
         attn_implementation="sdpa",
         device_map={"": f"cuda:{rank}"},
-        quantization_config=BitsAndBytesConfig(load_in_8bit=args.load_in_8bit),
+        quantization_config=(
+            BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
+            if args.load_in_8bit
+            else None
+        ),
         torch_dtype=dtype,
         token=args.hf_token,
     )
@@ -68,7 +78,7 @@ def run():
         # TODO: Maybe set this to False by default? But RPJ requires it.
         trust_remote_code=True,
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
 
     # TODO: Only do the chunking and tokenization on rank 0
     tokenized = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len)

@@ -3,7 +3,8 @@ from typing import Sized
 
 import torch
 import torch.distributed as dist
-from torch import nn
+from torch import nn, Tensor
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
@@ -12,7 +13,7 @@ from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 from . import __version__
 from .config import TrainConfig
 from .sae import Sae
-from .utils import geometric_median, maybe_all_cat, maybe_all_reduce
+from .utils import geometric_median
 
 
 class SaeTrainer:
@@ -25,11 +26,12 @@ class SaeTrainer:
             cfg.layers = list(range(0, N, cfg.layer_stride))
 
             print(f"Training on layers: {cfg.layers}")
-
-        N = len(cfg.layers)
+        
         self.cfg = cfg
         self.dataset = dataset
+        self.distribute_layers()
 
+        N = len(cfg.layers)
         assert isinstance(dataset, Sized)
         num_examples = len(dataset)
 
@@ -68,6 +70,8 @@ class SaeTrainer:
         torch.set_float32_matmul_precision("high")
 
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
+        ddp = dist.is_initialized() and not self.cfg.distribute_layers
+
         if self.cfg.log_to_wandb and rank_zero:
             try:
                 import wandb
@@ -110,8 +114,10 @@ class SaeTrainer:
                     batch["input_ids"].to(device), output_hidden_states=True
                 ).hidden_states[:-1]
 
-                # Only keep the layers we care about
-                hidden_list = [hidden_list[i] for i in self.cfg.layers]
+                if self.layer_plan:
+                    hidden_list = self.scatter_hiddens(hidden_list)
+                else:
+                    hidden_list = [hidden_list[i] for i in self.cfg.layers]
 
             # 'raw' never has a DDP wrapper
             for j, (hiddens, raw) in enumerate(zip(hidden_list, self.saes)):
@@ -124,7 +130,7 @@ class SaeTrainer:
                     # We could avoid this by "approximating" the geometric median
                     # across all ranks with the mean (median?) of the geometric medians
                     # on each rank. Not clear if that would hurt performance.
-                    median = geometric_median(maybe_all_cat(hiddens))
+                    median = geometric_median(self.maybe_all_cat(hiddens))
                     raw.b_dec.data = median.to(raw.dtype)
 
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
@@ -133,39 +139,43 @@ class SaeTrainer:
                     maybe_wrapped = [
                         DDP(sae, device_ids=[dist.get_rank()])
                         for sae in self.saes
-                    ] if dist.is_initialized() else self.saes
+                    ] if ddp else self.saes
 
                 # Make sure the W_dec is still unit-norm
                 if raw.cfg.normalize_decoder:
                     raw.set_decoder_norm_to_unit_norm()
 
+                acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
+                denom = acc_steps * self.cfg.wandb_log_frequency
                 wrapped = maybe_wrapped[j]
-                out = wrapped(
-                    hiddens,
-                    dead_mask=(
-                        self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
-                        if self.cfg.auxk_alpha > 0
-                        else None
-                    ),
-                )
 
-                denom = self.cfg.grad_acc_steps * self.cfg.wandb_log_frequency
-                avg_fvu[j] += maybe_all_reduce(out.fvu.detach()) / denom
-                if self.cfg.auxk_alpha > 0:
-                    avg_auxk_loss[j] += maybe_all_reduce(out.auxk_loss.detach()) / denom
+                # Save memory by chunking the activations
+                for chunk in hiddens.chunk(self.cfg.micro_acc_steps):
+                    out = wrapped(
+                        chunk,
+                        dead_mask=(
+                            self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
+                            if self.cfg.auxk_alpha > 0
+                            else None
+                        ),
+                    )
 
-                loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
-                loss.div(self.cfg.grad_acc_steps).backward()
+                    avg_fvu[j] += self.maybe_all_reduce(out.fvu.detach()) / denom
+                    if self.cfg.auxk_alpha > 0:
+                        avg_auxk_loss[j] += self.maybe_all_reduce(out.auxk_loss.detach()) / denom
+
+                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    loss.div(acc_steps).backward()
+
+                    # Update the did_fire mask
+                    did_fire[j][out.latent_indices.flatten()] = True
+                    self.maybe_all_reduce(did_fire[j], "max")    # max is boolean "any"
 
                 # Clip gradient norm independently for each SAE
-                grad_norm = torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
-
-                # Update the did_fire mask
-                did_fire[j][out.latent_indices.flatten()] = True
-                maybe_all_reduce(did_fire[j], "max")    # max is boolean "any"
+                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
             # Check if we need to actually do a training step
-            step, substep = divmod(i, self.cfg.grad_acc_steps)
+            step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
             if substep == 0:
                 if self.cfg.sae.normalize_decoder:
                     for sae in self.saes:
@@ -200,17 +210,94 @@ class SaeTrainer:
                     avg_auxk_loss.zero_()
                     avg_fvu.zero_()
 
+                    if self.cfg.distribute_layers:
+                        outputs = [{} for _ in range(dist.get_world_size())]
+                        dist.gather_object(info, outputs if rank_zero else None)
+                        info.update({k: v for out in outputs for k, v in out.items()})
+
                     if rank_zero:
                         wandb.log(info, step=step)
 
-            if rank_zero and (step + 1) % self.cfg.save_every == 0:
+            if (step + 1) % self.cfg.save_every == 0:
                 self.save()
 
         self.save()
         pbar.close()
     
+    def maybe_all_cat(self, x: Tensor) -> Tensor:
+        """Concatenate a tensor across all processes."""
+        if not dist.is_initialized() or self.cfg.distribute_layers:
+            return x
+
+        buffer = x.new_empty([dist.get_world_size() * x.shape[0], *x.shape[1:]])
+        dist.all_gather_into_tensor(buffer, x)
+        return buffer
+
+    
+    def maybe_all_reduce(self, x: Tensor, op: str = "mean") -> Tensor:
+        if not dist.is_initialized() or self.cfg.distribute_layers:
+            return x
+
+        if op == "sum":
+            dist.all_reduce(x, op=dist.ReduceOp.SUM)
+        elif op == "mean":
+            dist.all_reduce(x, op=dist.ReduceOp.SUM)
+            x /= dist.get_world_size()
+        elif op == "max":
+            dist.all_reduce(x, op=dist.ReduceOp.MAX)
+        else:
+            raise ValueError(f"Unknown reduction op '{op}'")
+
+        return x
+    
+    def distribute_layers(self):
+        """Prepare a plan for distributing layers across ranks."""
+        if not self.cfg.distribute_layers:
+            self.layer_plan = {}
+            return
+
+        layers_per_rank, rem = divmod(len(self.cfg.layers), dist.get_world_size())
+        assert rem == 0, "Number of layers must be divisible by world size"
+
+        # Each rank gets a subset of the layers
+        self.layer_plan = {
+            rank: self.cfg.layers[start:start + layers_per_rank]
+            for rank, start in enumerate(range(0, len(self.cfg.layers), layers_per_rank))
+        }
+        for rank, layers in self.layer_plan.items():
+            print(f"Rank {rank} layers: {layers}")
+        
+        self.cfg.layers = self.layer_plan[dist.get_rank()]
+
+    def scatter_hiddens(self, hidden_list: list[Tensor]) -> list[Tensor]:
+        """Scatter & gather the hidden states across ranks."""
+        outputs = [
+            # Add a new leading "layer" dimension to each tensor
+            torch.stack([hidden_list[i] for i in layers], dim=1)
+            for layers in self.layer_plan.values()
+        ]
+        # Allocate one contiguous buffer to minimize memcpys
+        buffer = outputs[0].new_empty(
+            # The (micro)batch size times the world size
+            hidden_list[0].shape[0] * dist.get_world_size(),
+            # The number of layers we expect to receive
+            len(self.layer_plan[dist.get_rank()]),
+            # All other dimensions
+            *hidden_list[0].shape[1:],
+        )
+
+        # Perform the all-to-all scatter
+        inputs = buffer.split([len(output) for output in outputs])
+        dist.all_to_all([x for x in inputs], outputs)
+
+        # Return a list of results, one for each layerfi
+        return buffer.unbind(1)
+
     def save(self):
         """Save the SAEs to disk."""
+        if (dist.is_initialized() and dist.get_rank() != 0) and not self.cfg.distribute_layers:
+            return
+
         for i, sae in zip(self.cfg.layers, self.saes):
             assert isinstance(sae, Sae)
 

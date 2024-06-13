@@ -29,6 +29,9 @@ class TrainConfig(Serializable):
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
+    micro_acc_steps: int = 1
+    """Chunk the activations into this number of microbatches for SAE training."""
+
     lr: float | None = None
     """Base LR. If None, it is automatically chosen based on the number of latents."""
 
@@ -46,14 +49,11 @@ class TrainConfig(Serializable):
     layer_stride: int = 1
     """Stride between layers to train SAEs on."""
 
+    distribute_layers: bool = False
+    """Store a single copy of each SAE, instead of copying them across devices."""
+
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
-
-    hf_token: str | None = None
-    """Huggingface API token for downloading models."""
-
-    load_in_8bit: bool = False
-    """Load the model in 8-bit mode."""
 
     log_to_wandb: bool = True
     run_name: str | None = None

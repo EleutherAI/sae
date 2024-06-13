@@ -30,31 +30,3 @@ def geometric_median(points: Tensor, max_iter: int = 100, tol: float = 1e-5):
             break
 
     return guess
-
-
-def maybe_all_cat(x: Tensor) -> Tensor:
-    """Concatenate a tensor across all processes."""
-    if not dist.is_initialized():
-        return x
-
-    buffer = x.new_empty([dist.get_world_size() * x.shape[0], *x.shape[1:]])
-    dist.all_gather_into_tensor(buffer, x)
-    return buffer
-
-
-def maybe_all_reduce(x: Tensor, op: str = "mean") -> Tensor:
-    """Reduce a tensor across all processes."""
-    if not dist.is_initialized():
-        return x
-
-    if op == "sum":
-        dist.all_reduce(x, op=dist.ReduceOp.SUM)
-    elif op == "mean":
-        dist.all_reduce(x, op=dist.ReduceOp.SUM)
-        x /= dist.get_world_size()
-    elif op == "max":
-        dist.all_reduce(x, op=dist.ReduceOp.MAX)
-    else:
-        raise ValueError(f"Unknown reduction op '{op}'")
-
-    return x
