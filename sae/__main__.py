@@ -40,6 +40,14 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
+    data_preprocessing_num_proc: int = field(
+        default_factory=lambda: cpu_count() // 2,
+    )
+    """Number of processes to use for preprocessing data"""
+
+    attn_implementation: str = "sdpa"
+    """Which implementation to use for attention in `transformers`. Pythia models require "eager"."""
+
 
 def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset]:
     if args.load_in_8bit:
@@ -51,7 +59,7 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        attn_implementation="sdpa",
+        attn_implementation=args.attn_implementation,
         device_map={"": f"cuda:{rank}"},
         quantization_config=(
             BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
@@ -69,7 +77,7 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
         trust_remote_code=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-    dataset = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len)
+    dataset = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len, num_proc=args.data_preprocessing_num_proc)
 
     return model, dataset
 
