@@ -5,6 +5,7 @@ import os
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
+from multiprocessing import cpu_count
 from simple_parsing import field, parse
 from transformers import (
     AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
