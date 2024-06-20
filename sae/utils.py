@@ -1,6 +1,10 @@
 from torch import Tensor
 import torch
-import torch.distributed as dist
+
+
+def ceil_div(a: int, b: int) -> int:
+    """Ceiling division; see https://stackoverflow.com/questions/14822184."""
+    return -(a // -b)
 
 
 @torch.no_grad()

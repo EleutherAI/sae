@@ -1,19 +1,17 @@
-from dataclasses import asdict
-from typing import Sized
+import os
 
 import torch
 import torch.distributed as dist
+from datasets import Dataset
+from safetensors.torch import load_model
 from torch import nn, Tensor
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 
-from . import __version__
 from .config import TrainConfig
 from .sae import Sae
-from .utils import geometric_median
+from .utils import ceil_div, geometric_median
 
 
 class SaeTrainer:
@@ -26,12 +24,10 @@ class SaeTrainer:
             cfg.layers = list(range(0, N, cfg.layer_stride))
         
         self.cfg = cfg
-        self.dataset = dataset
+        self.dataset = dataset.shuffle(seed=cfg.shuffle_seed)
         self.distribute_layers()
 
-        N = len(cfg.layers)
-        assert isinstance(dataset, Sized)
-        num_examples = len(dataset)
+        N = len(self.layers)
 
         device = model.device
         self.model = model
@@ -42,7 +38,7 @@ class SaeTrainer:
 
         # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
         if (lr := cfg.lr) is None:
-            # Base LR is 1e-4 for num latents = 2 ** 13
+            # Base LR is 2e-4 for num latents = 2 ** 14
             scale = d / (2 ** 14)
 
             lr = 2e-4 / scale ** 0.5
@@ -58,10 +54,28 @@ class SaeTrainer:
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
+        self.batch_idx = 0
         self.optimizer = Adam(self.saes.parameters(), lr=lr)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+            self.optimizer, cfg.lr_warmup_steps, len(dataset) // cfg.batch_size
         )
+
+    @classmethod
+    def resume_from(cls, path: str, dataset: Dataset, model: PreTrainedModel):
+        cfg = TrainConfig.load_json(f"{path}/cfg.json")
+        trainer = cls(cfg, dataset, model)
+
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        state = torch.load(f"{path}/rank_{rank}.pt")
+        trainer.batch_idx = state["batch_idx"]
+        trainer.optimizer.load_state_dict(state["optimizer"])
+        trainer.lr_scheduler.load_state_dict(state["scheduler"])
+
+        for layer, sae in zip(trainer.layers, trainer.saes):
+            load_model(sae, f"{path}/layer_{layer}/sae.safetensors")
+
+        print(f"Resuming from '{path}' at batch {trainer.batch_idx:_}")
+        return trainer
 
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
@@ -75,7 +89,7 @@ class SaeTrainer:
                 import wandb
 
                 wandb.init(
-                    name=self.cfg.run_name, config=asdict(self.cfg), save_code=True
+                    name=self.cfg.run_name, config=self.cfg.to_dict(), save_code=True
                 )
             except ImportError:
                 print("Weights & Biases not installed, skipping logging.")
@@ -86,23 +100,29 @@ class SaeTrainer:
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
-        device = self.model.device
-        dl = DataLoader(
-            self.dataset,
-            batch_size=self.cfg.batch_size,
-            shuffle=True,
+        bs = self.cfg.batch_size
+        num_batches = ceil_div(len(self.dataset), bs)
+        pbar = tqdm(
+            desc="Training",
+            disable=not rank_zero,
+            initial=self.batch_idx,
+            total=num_batches,
         )
-        pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
         # This mask is zeroed out every training step
         did_fire = torch.zeros_like(self.num_tokens_since_fired, dtype=torch.bool)
         num_tokens_in_step = 0
 
         # For logging purposes
+        device = self.model.device
         avg_auxk_loss = torch.zeros(len(self.saes), device=device)
         avg_fvu = torch.zeros(len(self.saes), device=device)
 
-        for i, batch in enumerate(pbar):
+        while self.batch_idx < num_batches:
+            # We manually slice into the dataset instead of using a DataLoader mainly
+            # because it seemed easier to make it fully resumable this way.
+            batch = self.dataset[self.batch_idx * bs : (self.batch_idx + 1) * bs]
+
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
 
@@ -112,7 +132,7 @@ class SaeTrainer:
                     batch["input_ids"].to(device), output_hidden_states=True
                 ).hidden_states[:-1]
 
-                if self.layer_plan:
+                if self.cfg.distribute_layers:
                     hidden_list = self.scatter_hiddens(hidden_list)
                 else:
                     hidden_list = [hidden_list[i] for i in self.cfg.layers]
@@ -122,7 +142,7 @@ class SaeTrainer:
                 hiddens = hiddens.flatten(0, 1)
 
                 # On the first iteration, initialize the decoder bias
-                if i == 0:
+                if self.batch_idx == 0:
                     # NOTE: The all-cat here could conceivably cause an OOM in some
                     # cases, but it's unlikely to be a problem with small world sizes.
                     # We could avoid this by "approximating" the geometric median
@@ -173,7 +193,7 @@ class SaeTrainer:
                 torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
             # Check if we need to actually do a training step
-            step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
+            step, substep = divmod(self.batch_idx + 1, self.cfg.grad_acc_steps)
             if substep == 0:
                 if self.cfg.sae.normalize_decoder:
                     for sae in self.saes:
@@ -196,7 +216,7 @@ class SaeTrainer:
 
                     for j in range(len(self.saes)):
                         mask = self.num_tokens_since_fired[j] > self.cfg.dead_feature_threshold
-                        layer_idx = self.cfg.layers[j]
+                        layer_idx = self.layers[j]
 
                         info.update({
                             f"fvu/layer_{layer_idx}": avg_fvu[j].item(),
@@ -216,8 +236,14 @@ class SaeTrainer:
                     if rank_zero:
                         wandb.log(info, step=step)
 
-            if (step + 1) % self.cfg.save_every == 0:
+            if (step + 1) % self.cfg.save_every == 0 and substep == 0:
+                if rank_zero:
+                    pbar.write(f"Saving checkpoint...")
+
                 self.save()
+
+            self.batch_idx += 1
+            pbar.update()
 
         self.save()
         pbar.close()
@@ -251,6 +277,7 @@ class SaeTrainer:
     def distribute_layers(self):
         """Prepare a plan for distributing layers across ranks."""
         if not self.cfg.distribute_layers:
+            self.layers = self.cfg.layers
             self.layer_plan = {}
             print(f"Training on layers: {self.cfg.layers}")
             return
@@ -266,7 +293,7 @@ class SaeTrainer:
         for rank, layers in self.layer_plan.items():
             print(f"Rank {rank} layers: {layers}")
         
-        self.cfg.layers = self.layer_plan[dist.get_rank()]
+        self.layers = self.layer_plan[dist.get_rank()]
 
     def scatter_hiddens(self, hidden_list: list[Tensor]) -> list[Tensor]:
         """Scatter & gather the hidden states across ranks."""
@@ -290,15 +317,27 @@ class SaeTrainer:
         dist.all_to_all([x for x in inputs], outputs)
 
         # Return a list of results, one for each layerfi
-        return buffer.unbind(1)
+        return list(buffer.unbind(1))
 
     def save(self):
         """Save the SAEs to disk."""
-        if (dist.is_initialized() and dist.get_rank() != 0) and not self.cfg.distribute_layers:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        path = self.cfg.run_name or "checkpoints"
+        os.makedirs(path, exist_ok=True)
+
+        if rank == 0:
+            self.cfg.save_json(f"{path}/cfg.json", indent=4)
+        elif not self.cfg.distribute_layers:
             return
 
-        for i, sae in zip(self.cfg.layers, self.saes):
+        state = {
+            "batch_idx": self.batch_idx,
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.lr_scheduler.state_dict(),
+        }
+        torch.save(state, f"{path}/rank_{rank}.pt")
+
+        for i, sae in zip(self.layers, self.saes):
             assert isinstance(sae, Sae)
 
-            path = self.cfg.run_name or "checkpoints"
-            sae.save_to_disk(f"{path}/layer_{i}.pt")
+            sae.save_to_disk(f"{path}/layer_{i}")

@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from simple_parsing import list_field, Serializable
 
-from . import __version__
-
 
 @dataclass
 class SaeConfig(Serializable):
@@ -54,6 +52,9 @@ class TrainConfig(Serializable):
 
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
+
+    shuffle_seed: int = 42
+    """Seed for shuffling the dataset."""
 
     log_to_wandb: bool = True
     run_name: str | None = None

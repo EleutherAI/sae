@@ -73,7 +73,7 @@ class Sae(nn.Module):
             json.dump({
                 **self.cfg.to_dict(),
                 "d_in": self.d_in,
-            }, f)
+            }, f, indent=4)
 
     @property
     def device(self):
