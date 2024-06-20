@@ -12,7 +12,7 @@ Following Gao et al., we use a TopK activation function which directly enforces 
 To train SAEs from the command line, you can use the following command:
 
 ```bash
-python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
+python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --attn_implementation=eager
 ```
 
 The CLI supports all of the config options provided by the `TrainConfig` class. You can see them by running `python -m sae --help`.
