@@ -98,6 +98,10 @@ class Sae(nn.Module):
         return y + self.b_dec
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
+        
+        #Handling batched inputs
+        x = x.reshape(-1, x.shape[-1])
+        
         latent_acts = self.encode(x)
         top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
 
