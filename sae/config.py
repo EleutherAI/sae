@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from simple_parsing import list_field, Serializable
 
-from . import __version__
-
 
 @dataclass
 class SaeConfig(Serializable):
@@ -17,6 +15,8 @@ class SaeConfig(Serializable):
 
     k: int = 32
     """Number of nonzero features."""
+
+    signed: bool = False
 
 
 @dataclass
