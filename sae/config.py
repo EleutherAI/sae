@@ -37,7 +37,7 @@ class TrainConfig(Serializable):
 
     lr_warmup_steps: int = 1000
  
-    auxk_alpha: float = 1 / 32
+    auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""
 
     dead_feature_threshold: int = 10_000_000

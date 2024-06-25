@@ -4,7 +4,6 @@ from typing import Sized
 import torch
 import torch.distributed as dist
 from torch import nn, Tensor
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm

@@ -43,7 +43,6 @@ class Sae(nn.Module):
 
         self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
-        self.encoder.weight.data *= 0.1    # Small init means FVU starts below 1.0
 
         self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
         if self.cfg.normalize_decoder:
