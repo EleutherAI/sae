@@ -4,13 +4,11 @@ from typing import Sized
 import torch
 import torch.distributed as dist
 from torch import nn, Tensor
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import get_linear_schedule_with_warmup, PreTrainedModel
 
-from . import __version__
 from .config import TrainConfig
 from .sae import Sae
 from .utils import geometric_median
@@ -75,7 +73,10 @@ class SaeTrainer:
                 import wandb
 
                 wandb.init(
-                    name=self.cfg.run_name, config=asdict(self.cfg), save_code=True
+                    name=self.cfg.run_name,
+                    project="sae",
+                    config=asdict(self.cfg),
+                    save_code=True,
                 )
             except ImportError:
                 print("Weights & Biases not installed, skipping logging.")
@@ -216,8 +217,8 @@ class SaeTrainer:
                     if rank_zero:
                         wandb.log(info, step=step)
 
-            if (step + 1) % self.cfg.save_every == 0:
-                self.save()
+                if (step + 1) % self.cfg.save_every == 0:
+                    self.save()
 
         self.save()
         pbar.close()
@@ -289,7 +290,7 @@ class SaeTrainer:
         inputs = buffer.split([len(output) for output in outputs])
         dist.all_to_all([x for x in inputs], outputs)
 
-        # Return a list of results, one for each layerfi
+        # Return a list of results, one for each layer
         return buffer.unbind(1)
 
     def save(self):
@@ -299,6 +300,10 @@ class SaeTrainer:
 
         for i, sae in zip(self.cfg.layers, self.saes):
             assert isinstance(sae, Sae)
+            print(f"Saving layer {i}")
 
             path = self.cfg.run_name or "checkpoints"
             sae.save_to_disk(f"{path}/layer_{i}.pt")
+
+        # Barrier to ensure all ranks have saved before continuing
+        dist.barrier()

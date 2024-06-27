@@ -43,7 +43,6 @@ class Sae(nn.Module):
 
         self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
-        self.encoder.weight.data *= 0.1    # Small init means FVU starts below 1.0
 
         self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
         if self.cfg.normalize_decoder:
@@ -86,8 +85,9 @@ class Sae(nn.Module):
     def encode(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
         # Remove decoder bias as per Anthropic
         sae_in = x.to(self.dtype) - self.b_dec
+        out = self.encoder(sae_in)
 
-        return nn.functional.relu(self.encoder(sae_in))
+        return nn.functional.relu(out) if not self.cfg.signed else out
 
     def decode(
         self,
@@ -99,7 +99,12 @@ class Sae(nn.Module):
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
         latent_acts = self.encode(x)
-        top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
+
+        if self.cfg.signed:
+            _, top_indices = latent_acts.abs().topk(self.cfg.k, sorted=False)
+            top_acts = latent_acts.gather(dim=-1, index=top_indices)
+        else:
+            top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
 
         # Decode and compute residual
         sae_out = self.decode(top_acts, top_indices)

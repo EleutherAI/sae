@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from simple_parsing import list_field, Serializable
 
-from . import __version__
-
 
 @dataclass
 class SaeConfig(Serializable):
@@ -17,6 +15,8 @@ class SaeConfig(Serializable):
 
     k: int = 32
     """Number of nonzero features."""
+
+    signed: bool = False
 
 
 @dataclass
@@ -37,7 +37,7 @@ class TrainConfig(Serializable):
 
     lr_warmup_steps: int = 1000
  
-    auxk_alpha: float = 1 / 32
+    auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""
 
     dead_feature_threshold: int = 10_000_000
