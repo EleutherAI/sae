@@ -217,8 +217,8 @@ class SaeTrainer:
                     if rank_zero:
                         wandb.log(info, step=step)
 
-            if (step + 1) % self.cfg.save_every == 0:
-                self.save()
+                if (step + 1) % self.cfg.save_every == 0:
+                    self.save()
 
         self.save()
         pbar.close()
@@ -295,11 +295,15 @@ class SaeTrainer:
 
     def save(self):
         """Save the SAEs to disk."""
-        if (dist.is_initialized() and dist.get_rank() != 0) and not self.cfg.distribute_layers:
-            return
+        #if (dist.is_initialized() and dist.get_rank() != 0) and not self.cfg.distribute_layers:
+        #    return
 
         for i, sae in zip(self.cfg.layers, self.saes):
             assert isinstance(sae, Sae)
+            print(f"Saving layer {i}")
 
             path = self.cfg.run_name or "checkpoints"
             sae.save_to_disk(f"{path}/layer_{i}.pt")
+
+        # Barrier to ensure all ranks have saved before continuing
+        dist.barrier()
