@@ -304,7 +304,7 @@ class SaeTrainer:
                 print(f"Saving layer {i}")
 
                 path = self.cfg.run_name or "checkpoints"
-                sae.save_to_disk(f"{path}/layer_{i}.pt")
+                sae.save_to_disk(f"{path}/layer_{i}")
 
         # Barrier to ensure all ranks have saved before continuing
         dist.barrier()
