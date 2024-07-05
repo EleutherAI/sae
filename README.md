@@ -7,7 +7,24 @@ Unlike other libraries, we also train an SAE for _every_ layer of the network at
 
 Following Gao et al., we use a TopK activation function which directly enforces a desired level of sparsity in the activations. This is in contrast to other libraries which use an L1 penalty in the loss function. We believe TopK is a Pareto improvement over the L1 approach, and hence do not plan on supporting it.
 
-## Usage
+## Loading pretrained SAEs
+
+To load a pretrained SAE from the HuggingFace Hub, you can use the `Sae.load_from_hub` method as follows:
+
+```python
+from sae import Sae
+
+sae = Sae.load_from_hub("EleutherAI/sae-llama-3-8b-32x", layer=10)
+```
+
+This will load the SAE for residual stream layer 10 of Llama 3 8B, which was trained with an expansion factor of 32. You can also load the SAEs for all layers at once using `Sae.load_many_from_hub`:
+
+```python
+saes = Sae.load_many_from_hub("EleutherAI/sae-llama-3-8b-32x")
+saes["layer_10"]
+```
+
+## Training SAEs
 
 To train SAEs from the command line, you can use the following command:
 

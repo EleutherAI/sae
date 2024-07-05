@@ -232,7 +232,6 @@ class SaeTrainer:
         dist.all_gather_into_tensor(buffer, x)
         return buffer
 
-    
     def maybe_all_reduce(self, x: Tensor, op: str = "mean") -> Tensor:
         if not dist.is_initialized() or self.cfg.distribute_layers:
             return x

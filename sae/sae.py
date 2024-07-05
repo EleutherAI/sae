@@ -1,9 +1,11 @@
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
 
 import einops
 import torch
+from huggingface_hub import snapshot_download
 from jaxtyping import Float, Int64
 from safetensors.torch import load_model, save_model
 from torch import nn, Tensor
@@ -49,6 +51,43 @@ class Sae(nn.Module):
             self.set_decoder_norm_to_unit_norm()
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+    
+    @staticmethod
+    def load_many_from_hub(
+        name: str,
+        device: str | torch.device = "cpu",
+        *,
+        pattern: str | None,
+    ) -> dict[str, "Sae"]:
+        """Load SAEs for multiple hookpoints on a single model and dataset."""
+        pattern = pattern + "/*" if pattern is not None else None
+        repo_path = Path(snapshot_download(name, allow_patterns=pattern))
+        return {
+            f.stem: Sae.load_from_disk(f, device=device)
+            for f in repo_path.iterdir()
+            if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
+        }
+
+    @staticmethod
+    def load_from_hub(
+        name: str,
+        layer: int | None = None,
+        device: str | torch.device = "cpu",
+    ) -> "Sae":
+        # Download from the HuggingFace Hub
+        repo_path = Path(
+            snapshot_download(
+                name, allow_patterns=f"layer_{layer}/*" if layer is not None else None,
+            )
+        )
+        if layer is not None:
+            repo_path = repo_path / f"layer_{layer}"
+        
+        # No layer specified, and there are multiple layers
+        elif not repo_path.joinpath("cfg.json").exists():
+            raise FileNotFoundError(f"No config file found; try specifying a layer.")
+
+        return Sae.load_from_disk(repo_path, device=device)
 
     @staticmethod
     def load_from_disk(path: Path | str, device: str | torch.device = "cpu") -> "Sae":
