@@ -222,7 +222,7 @@ class SaeTrainer:
 
         self.save()
         pbar.close()
-    
+
     def maybe_all_cat(self, x: Tensor) -> Tensor:
         """Concatenate a tensor across all processes."""
         if not dist.is_initialized() or self.cfg.distribute_layers:
@@ -247,7 +247,7 @@ class SaeTrainer:
             raise ValueError(f"Unknown reduction op '{op}'")
 
         return x
-    
+
     def distribute_layers(self):
         """Prepare a plan for distributing layers across ranks."""
         if not self.cfg.distribute_layers:
