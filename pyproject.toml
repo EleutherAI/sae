@@ -13,6 +13,7 @@ dependencies = [
     "accelerate",   # For device_map in from_pretrained
     "datasets",
     "einops",
+    "huggingface-hub",
     "jaxtyping",
     "safetensors",
     "simple-parsing",

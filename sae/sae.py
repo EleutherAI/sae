@@ -1,9 +1,11 @@
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
 
 import einops
 import torch
+from huggingface_hub import snapshot_download
 from jaxtyping import Float, Int64
 from safetensors.torch import load_model, save_model
 from torch import nn, Tensor
@@ -35,6 +37,8 @@ class Sae(nn.Module):
         cfg: SaeConfig,
         device: str | torch.device = "cpu",
         dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
     ):
         super().__init__()
         self.cfg = cfg
@@ -44,14 +48,63 @@ class Sae(nn.Module):
         self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
 
-        self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
-        if self.cfg.normalize_decoder:
+        self.W_dec = (
+            nn.Parameter(self.encoder.weight.data.clone())
+            if decoder
+            else None
+        )
+        if decoder and self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
     @staticmethod
-    def load_from_disk(path: Path | str, device: str | torch.device = "cpu") -> "Sae":
+    def load_many_from_hub(
+        name: str,
+        device: str | torch.device = "cpu",
+        *,
+        decoder: bool = True,
+        pattern: str | None,
+    ) -> dict[str, "Sae"]:
+        """Load SAEs for multiple hookpoints on a single model and dataset."""
+        pattern = pattern + "/*" if pattern is not None else None
+        repo_path = Path(snapshot_download(name, allow_patterns=pattern))
+        return {
+            f.stem: Sae.load_from_disk(f, device=device, decoder=decoder)
+            for f in repo_path.iterdir()
+            if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
+        }
+
+    @staticmethod
+    def load_from_hub(
+        name: str,
+        layer: int | None = None,
+        device: str | torch.device = "cpu",
+        *,
+        decoder: bool = True,
+    ) -> "Sae":
+        # Download from the HuggingFace Hub
+        repo_path = Path(
+            snapshot_download(
+                name, allow_patterns=f"layer_{layer}/*" if layer is not None else None,
+            )
+        )
+        if layer is not None:
+            repo_path = repo_path / f"layer_{layer}"
+
+        # No layer specified, and there are multiple layers
+        elif not repo_path.joinpath("cfg.json").exists():
+            raise FileNotFoundError(f"No config file found; try specifying a layer.")
+
+        return Sae.load_from_disk(repo_path, device=device, decoder=decoder)
+
+    @staticmethod
+    def load_from_disk(
+        path: Path | str,
+        device: str | torch.device = "cpu",
+        *,
+        decoder: bool = True,
+    ) -> "Sae":
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
@@ -59,8 +112,14 @@ class Sae(nn.Module):
             d_in = cfg_dict.pop("d_in")
             cfg = SaeConfig(**cfg_dict)
 
-        sae = Sae(d_in, cfg, device=device)
-        load_model(sae, str(path / "sae.safetensors"), device=str(device))
+        sae = Sae(d_in, cfg, device=device, decoder=decoder)
+        load_model(
+            model=sae,
+            filename=str(path / "sae.safetensors"),
+            device=str(device),
+            # TODO: Maybe be more fine-grained about this in the future?
+            strict=decoder,
+        )
         return sae
 
     def save_to_disk(self, path: Path | str):
@@ -76,11 +135,11 @@ class Sae(nn.Module):
 
     @property
     def device(self):
-        return self.b_dec.device
+        return self.encoder.weight.device
 
     @property
     def dtype(self):
-        return self.b_dec.dtype
+        return self.encoder.weight.dtype
 
     def encode(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
         # Remove decoder bias as per Anthropic
@@ -94,6 +153,8 @@ class Sae(nn.Module):
         top_acts: Float[Tensor, "... d_sae"],
         top_indices: Int64[Tensor, "..."],
     ) -> Float[Tensor, "... d_in"]:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+
         y = TritonDecoder.apply(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
@@ -149,12 +210,15 @@ class Sae(nn.Module):
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+
         eps = torch.finfo(self.W_dec.dtype).eps
         norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
         self.W_dec.data /= norm + eps
 
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):
+        assert self.W_dec is not None, "Decoder weight was not initialized."
         assert self.W_dec.grad is not None  # keep pyright happy
 
         parallel_component = einops.einsum(
