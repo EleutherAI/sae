@@ -295,7 +295,7 @@ class SaeTrainer:
     def save(self):
         """Save the SAEs to disk."""
 
-        if self.cfg.distribute_layers or dist.get_rank() == 0 or not dist.is_initialized():
+        if self.cfg.distribute_layers or not dist.is_initialized() or dist.get_rank() == 0:
             for i, sae in zip(self.cfg.layers, self.saes):
                 assert isinstance(sae, Sae)
                 print(f"Saving layer {i}")
