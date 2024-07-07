@@ -141,12 +141,26 @@ class Sae(nn.Module):
     def dtype(self):
         return self.encoder.weight.dtype
 
-    def encode(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
+    def pre_acts(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
         # Remove decoder bias as per Anthropic
         sae_in = x.to(self.dtype) - self.b_dec
         out = self.encoder(sae_in)
 
         return nn.functional.relu(out) if not self.cfg.signed else out
+
+    def select_topk(self, latents: Float[Tensor, "... d_sae"]) -> tuple[Float[Tensor, "... d_sae"], Int64[Tensor, "..."]]:
+        """Select the top-k latents."""
+        if self.cfg.signed:
+            _, top_indices = latents.abs().topk(self.cfg.k, sorted=False)
+            top_acts = latents.gather(dim=-1, index=top_indices)
+
+            return top_acts, top_indices
+
+        return latents.topk(self.cfg.k, sorted=False)
+    
+    def encode(self, x: Float[Tensor, "... d_in"]) -> tuple[Float[Tensor, "... d_sae"], Int64[Tensor, "..."]]:
+        """Encode the input and select the top-k latents."""
+        return self.select_topk(self.pre_acts(x))
 
     def decode(
         self,
@@ -159,13 +173,8 @@ class Sae(nn.Module):
         return y + self.b_dec
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
-        latent_acts = self.encode(x)
-
-        if self.cfg.signed:
-            _, top_indices = latent_acts.abs().topk(self.cfg.k, sorted=False)
-            top_acts = latent_acts.gather(dim=-1, index=top_indices)
-        else:
-            top_acts, top_indices = latent_acts.topk(self.cfg.k, sorted=False)
+        pre_acts = self.pre_acts(x)
+        top_acts, top_indices = self.select_topk(pre_acts)
 
         # Decode and compute residual
         sae_out = self.decode(top_acts, top_indices)
@@ -184,7 +193,7 @@ class Sae(nn.Module):
             k_aux = min(k_aux, num_dead)
 
             # Don't include living latents in this loss
-            auxk_latents = torch.where(dead_mask[None], latent_acts, -torch.inf)
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
 
             # Top-k dead latents
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
