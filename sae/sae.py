@@ -14,6 +14,14 @@ from .config import SaeConfig
 from .kernels import TritonDecoder
 
 
+class EncoderOutput(NamedTuple):
+    top_acts: Float[Tensor, "... d_sae"]
+    """Activations of the top-k latents."""
+
+    top_indices: Int64[Tensor, "..."]
+    """Indices of the top-k features."""
+
+
 class ForwardOutput(NamedTuple):
     sae_out: Tensor
 
@@ -148,17 +156,17 @@ class Sae(nn.Module):
 
         return nn.functional.relu(out) if not self.cfg.signed else out
 
-    def select_topk(self, latents: Float[Tensor, "... d_sae"]) -> tuple[Float[Tensor, "... d_sae"], Int64[Tensor, "..."]]:
+    def select_topk(self, latents: Float[Tensor, "... d_sae"]) -> EncoderOutput:
         """Select the top-k latents."""
         if self.cfg.signed:
             _, top_indices = latents.abs().topk(self.cfg.k, sorted=False)
             top_acts = latents.gather(dim=-1, index=top_indices)
 
-            return top_acts, top_indices
+            return EncoderOutput(top_acts, top_indices)
 
-        return latents.topk(self.cfg.k, sorted=False)
+        return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
     
-    def encode(self, x: Float[Tensor, "... d_in"]) -> tuple[Float[Tensor, "... d_sae"], Int64[Tensor, "..."]]:
+    def encode(self, x: Float[Tensor, "... d_in"]) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
         return self.select_topk(self.pre_acts(x))
 
