@@ -15,6 +15,7 @@ dependencies = [
     "einops",
     "huggingface-hub",
     "jaxtyping",
+    "natsort",  # For sorting module names
     "safetensors",
     "simple-parsing",
     "torch",

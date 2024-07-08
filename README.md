@@ -24,6 +24,26 @@ saes = Sae.load_many_from_hub("EleutherAI/sae-llama-3-8b-32x")
 saes["layer_10"]
 ```
 
+The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `layer_0`, `layer_1`, ..., `layer_n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+inputs = tokenizer("Hello, world!", return_tensors="pt")
+
+with torch.inference_mode():
+    model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+    outputs = model(**inputs, output_hidden_states=True)
+
+    latent_acts = []
+    for sae, hidden_state in zip(saes.values(), outputs.hidden_states):
+        latent_acts.append(sae.encode(hidden_state))
+
+# Do stuff with the latent activations
+```
+
 ## Training SAEs
 
 To train SAEs from the command line, you can use the following command:

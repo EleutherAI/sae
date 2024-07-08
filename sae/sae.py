@@ -1,5 +1,6 @@
 import json
 from fnmatch import fnmatch
+from natsort import natsorted
 from pathlib import Path
 from typing import NamedTuple
 
@@ -72,15 +73,19 @@ class Sae(nn.Module):
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
-        pattern: str | None,
+        pattern: str | None = None,
     ) -> dict[str, "Sae"]:
         """Load SAEs for multiple hookpoints on a single model and dataset."""
         pattern = pattern + "/*" if pattern is not None else None
         repo_path = Path(snapshot_download(name, allow_patterns=pattern))
+
+        files = [
+            f for f in repo_path.iterdir()
+            if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
+        ]
         return {
             f.stem: Sae.load_from_disk(f, device=device, decoder=decoder)
-            for f in repo_path.iterdir()
-            if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
+            for f in natsorted(files, key=lambda f: f.stem)
         }
 
     @staticmethod
@@ -165,7 +170,7 @@ class Sae(nn.Module):
             return EncoderOutput(top_acts, top_indices)
 
         return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
-    
+
     def encode(self, x: Float[Tensor, "... d_in"]) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
         return self.select_topk(self.pre_acts(x))
