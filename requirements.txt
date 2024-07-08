@@ -1,0 +1,7 @@
+torch
+transformers
+datasets
+simple_parsing
+einops
+jaxtyping
+triton

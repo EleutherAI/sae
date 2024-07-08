@@ -78,3 +78,8 @@ There are several features that we'd like to add in the near future:
 - [ ] Evaluate SAEs with KL divergence when grafted into the model
 
 If you'd like to help out with any of these, please feel free to open a PR! You can collaborate with us in the sparse-autoencoders channel of the EleutherAI Discord.
+
+
+## Compatibility 
+
+This library depends on the [triton](https://github.com/triton-lang/triton) package to define some of its kernels. Triton in turn only supports Linux, so using this library on Windows or MacOS will not be straightforward.
