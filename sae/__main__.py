@@ -8,7 +8,7 @@ from datasets import Dataset, load_dataset
 from multiprocessing import cpu_count
 from simple_parsing import field, parse
 from transformers import (
-    AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
+    AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
 )
 
 from .data import chunk_and_tokenize
@@ -58,7 +58,7 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
     else:
         dtype = "auto"
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModel.from_pretrained(
         args.model,
         attn_implementation=args.attn_implementation,
         device_map={"": f"cuda:{rank}"},

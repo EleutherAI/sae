@@ -12,7 +12,6 @@ from safetensors.torch import load_model, save_model
 from torch import nn, Tensor
 
 from .config import SaeConfig
-from .kernels import TritonDecoder
 
 
 class EncoderOutput(NamedTuple):
@@ -180,6 +179,8 @@ class Sae(nn.Module):
         top_acts: Float[Tensor, "... d_sae"],
         top_indices: Int64[Tensor, "..."],
     ) -> Float[Tensor, "... d_in"]:
+        # Import here to allow use of the SAE without Triton
+        from .kernels import TritonDecoder
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
         y = TritonDecoder.apply(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
