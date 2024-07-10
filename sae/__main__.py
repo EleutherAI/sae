@@ -71,14 +71,27 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
         token=args.hf_token,
     )
 
-    dataset = load_dataset(
-        args.dataset,
-        split=args.split,
-        # TODO: Maybe set this to False by default? But RPJ requires it.
-        trust_remote_code=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-    dataset = chunk_and_tokenize(dataset, tokenizer, max_seq_len=args.ctx_len, num_proc=args.data_preprocessing_num_proc)
+    try:
+        dataset = load_dataset(
+            args.dataset,
+            split=args.split,
+            # TODO: Maybe set this to False by default? But RPJ requires it.
+            trust_remote_code=True,
+        )
+    except ValueError as e:
+        # Automatically use load_from_disk if appropriate
+        if "load_from_disk" in str(e):
+            dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
+        else:
+            raise e
+
+    if "input_ids" not in dataset.column_names:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+        dataset = chunk_and_tokenize(
+            dataset, tokenizer, max_seq_len=args.ctx_len, num_proc=args.data_preprocessing_num_proc
+        )
+    else:
+        print("Dataset already tokenized; skipping tokenization.")
 
     return model, dataset
 
