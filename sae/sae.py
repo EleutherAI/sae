@@ -84,8 +84,8 @@ class Sae(nn.Module):
             if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
         ]
         return {
-            f.stem: Sae.load_from_disk(f, device=device, decoder=decoder)
-            for f in natsorted(files, key=lambda f: f.stem)
+            f.name: Sae.load_from_disk(f, device=device, decoder=decoder)
+            for f in natsorted(files, key=lambda f: f.name)
         }
 
     @staticmethod

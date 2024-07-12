@@ -21,10 +21,10 @@ This will load the SAE for residual stream layer 10 of Llama 3 8B, which was tra
 
 ```python
 saes = Sae.load_many_from_hub("EleutherAI/sae-llama-3-8b-32x")
-saes["layer_10"]
+saes["layers.10"]
 ```
 
-The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `layer_0`, `layer_1`, ..., `layer_n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
+The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `layer.0`, `layer.1`, ..., `layer.n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
