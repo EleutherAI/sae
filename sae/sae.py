@@ -99,11 +99,11 @@ class Sae(nn.Module):
         # Download from the HuggingFace Hub
         repo_path = Path(
             snapshot_download(
-                name, allow_patterns=f"layer_{layer}/*" if layer is not None else None,
+                name, allow_patterns=f"layers.{layer}/*" if layer is not None else None,
             )
         )
         if layer is not None:
-            repo_path = repo_path / f"layer_{layer}"
+            repo_path = repo_path / f"layers.{layer}"
 
         # No layer specified, and there are multiple layers
         elif not repo_path.joinpath("cfg.json").exists():
