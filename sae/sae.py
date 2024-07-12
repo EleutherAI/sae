@@ -91,7 +91,7 @@ class Sae(nn.Module):
     @staticmethod
     def load_from_hub(
         name: str,
-        layer: int | None = None,
+        hookpoint: str | None = None,
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
@@ -99,11 +99,11 @@ class Sae(nn.Module):
         # Download from the HuggingFace Hub
         repo_path = Path(
             snapshot_download(
-                name, allow_patterns=f"layers.{layer}/*" if layer is not None else None,
+                name, allow_patterns=f"{hookpoint}/*" if hookpoint is not None else None,
             )
         )
-        if layer is not None:
-            repo_path = repo_path / f"layers.{layer}"
+        if hookpoint is not None:
+            repo_path = repo_path / hookpoint
 
         # No layer specified, and there are multiple layers
         elif not repo_path.joinpath("cfg.json").exists():

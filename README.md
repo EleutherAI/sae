@@ -14,17 +14,17 @@ To load a pretrained SAE from the HuggingFace Hub, you can use the `Sae.load_fro
 ```python
 from sae import Sae
 
-sae = Sae.load_from_hub("EleutherAI/sae-llama-3-8b-32x", layer=10)
+sae = Sae.load_from_hub("EleutherAI/sae-llama-3-8b-32x", hookpoint="layers.10")
 ```
 
 This will load the SAE for residual stream layer 10 of Llama 3 8B, which was trained with an expansion factor of 32. You can also load the SAEs for all layers at once using `Sae.load_many_from_hub`:
 
 ```python
 saes = Sae.load_many_from_hub("EleutherAI/sae-llama-3-8b-32x")
-saes["layer_10"]
+saes["layers.10"]
 ```
 
-The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `layer_0`, `layer_1`, ..., `layer_n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
+The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `embed_tokens`, `layers.0`, ..., `layers.n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
