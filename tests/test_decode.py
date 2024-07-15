@@ -1,8 +1,11 @@
 from sae.utils import eager_decode, triton_decode
 import torch
-
+import pytest
 
 def test_decode():
+    if not torch.cuda.is_available():
+        pytest.skip("This test requires a GPU to run.")
+        
     batch = 2
     d_in = 50
     d_sae = 100

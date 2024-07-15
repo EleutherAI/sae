@@ -104,6 +104,24 @@ torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --distribute_lay
 
 The above command trains an SAE for every _even_ layer of Llama 3 8B, using all available GPUs. It accumulates gradients over 8 minibatches, and splits each minibatch into 2 microbatches before feeding them into the SAE encoder, thus saving a lot of memory. It also loads the model in 8-bit precision using `bitsandbytes`. This command requires no more than 48GB of memory per GPU on an 8 GPU node.
 
+## Installation
+
+To install python dependencies
+
+```bash
+pip install .
+```
+
+[triton](https://github.com/triton-lang/triton) is an optional dependency of this project to make the sparse Autoencoder more efficient but it is not included in `pyproject.toml` because triton is not officially supported on Windows or MacOS. To benefit from triton kernels on a Linux system install triton separately with `pip install triton`.
+
+## Testing
+
+Install pytest with `pip install pytest` and run the tests
+
+```bash
+python -m pytest tests
+```
+
 ## TODO
 
 There are several features that we'd like to add in the near future:
