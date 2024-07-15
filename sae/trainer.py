@@ -296,9 +296,10 @@ class SaeTrainer:
         """Save the SAEs to disk."""
 
         if self.cfg.distribute_layers or not dist.is_initialized() or dist.get_rank() == 0:
+            print("Saving checkpoint")
+
             for i, sae in zip(self.cfg.layers, self.saes):
                 assert isinstance(sae, Sae)
-                print(f"Saving layer {i}")
 
                 path = self.cfg.run_name or "checkpoints"
                 sae.save_to_disk(f"{path}/layer_{i}")
