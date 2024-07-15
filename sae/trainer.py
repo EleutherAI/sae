@@ -35,7 +35,7 @@ class SaeTrainer:
         self.model = model
         self.saes = nn.ModuleList([Sae(d_in, cfg.sae, device) for _ in range(N)])
 
-        d = d_in * cfg.sae.expansion_factor
+        d = cfg.sae.num_latents or d_in * cfg.sae.expansion_factor
         self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
         # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper

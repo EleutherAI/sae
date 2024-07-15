@@ -52,7 +52,7 @@ class Sae(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        d_sae = d_in * cfg.expansion_factor
+        d_sae = cfg.num_latents or d_in * cfg.expansion_factor
 
         self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
@@ -181,10 +181,9 @@ class Sae(nn.Module):
         top_indices: Int64[Tensor, "..."],
     ) -> Float[Tensor, "... d_in"]:
         # Import here to allow use of the SAE without Triton
-        # from .kernels import TritonDecoder
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
-        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT) # TritonDecoder.apply(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:

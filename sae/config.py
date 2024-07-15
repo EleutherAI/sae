@@ -13,6 +13,9 @@ class SaeConfig(Serializable):
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
 
+    num_latents: int = 0
+    """Number of latents to use. If 0, use `expansion_factor`."""
+
     k: int = 32
     """Number of nonzero features."""
 
