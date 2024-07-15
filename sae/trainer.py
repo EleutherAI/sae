@@ -35,7 +35,7 @@ class SaeTrainer:
         self.model = model
         self.saes = nn.ModuleList([Sae(d_in, cfg.sae, device) for _ in range(N)])
 
-        d = d_in * cfg.sae.expansion_factor
+        d = cfg.sae.num_latents or d_in * cfg.sae.expansion_factor
         self.num_tokens_since_fired = torch.zeros(N, d, dtype=torch.long, device=device)
 
         # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
@@ -296,9 +296,10 @@ class SaeTrainer:
         """Save the SAEs to disk."""
 
         if self.cfg.distribute_layers or not dist.is_initialized() or dist.get_rank() == 0:
+            print("Saving checkpoint")
+
             for i, sae in zip(self.cfg.layers, self.saes):
                 assert isinstance(sae, Sae)
-                print(f"Saving layer {i}")
 
                 path = self.cfg.run_name or "checkpoints"
                 sae.save_to_disk(f"{path}/layer_{i}")
