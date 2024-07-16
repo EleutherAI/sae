@@ -1,5 +1,6 @@
-from sae.utils import eager_decode, triton_decode
 import torch
+
+from sae.utils import eager_decode, triton_decode
 
 
 def test_decode():

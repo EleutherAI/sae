@@ -49,7 +49,7 @@ with torch.inference_mode():
 To train SAEs from the command line, you can use the following command:
 
 ```bash
-python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --attn_implementation=eager
+python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
 ```
 
 The CLI supports all of the config options provided by the `TrainConfig` class. You can see them by running `python -m sae --help`.
@@ -88,6 +88,22 @@ trainer = SaeTrainer(cfg, tokenized, gpt)
 trainer.fit()
 ```
 
+## Custom hookpoints
+
+By default, the SAEs are trained on the residual stream activations of the model. However, you can also train SAEs on the activations of any other submodule(s) by specifying custom hookpoint patterns. These patterns are like standard PyTorch module names (e.g. `h.0.ln_1`) but also allow [Unix pattern matching syntax](https://docs.python.org/3/library/fnmatch.html), including wildcards and character sets. For example, to train SAEs on the output of every attention module and the inner activations of every MLP in GPT-2, you can use the following code:
+
+```bash
+python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.*.attn" "h.*.mlp.act"
+```
+
+To restrict to the first three layers:
+
+```bash
+python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.[012].attn" "h.[012].mlp.act"
+```
+
+We currently don't support fine-grained manual control over the learning rate, number of latents, or other hyperparameters on a hookpoint-by-hookpoint basis. By default, the `expansion_ratio` option is used to select the appropriate number of latents for each hookpoint based on the width of that hookpoint's output. The default learning rate for each hookpoint is then set using an inverse square root scaling law based on the number of latents. If you manually set the number of latents or the learning rate, it will be applied to all hookpoints.
+
 ## Distributed training
 
 We support distributed training via PyTorch's `torchrun` command. By default we use the Distributed Data Parallel method, which means that the weights of each SAE are replicated on every GPU.
@@ -96,10 +112,10 @@ We support distributed training via PyTorch's `torchrun` command. By default we 
 torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --batch_size 1 --layers 16 24 --k 192 --grad_acc_steps 8 --ctx_len 2048
 ```
 
-This is simple, but very memory inefficient. If you want to train SAEs for many layers of a model, we recommend using the `--distribute_layers` flag, which allocates the SAEs for different layers to different GPUs. Currently, we require that the number of GPUs evenly divides the number of layers you're training SAEs for.
+This is simple, but very memory inefficient. If you want to train SAEs for many layers of a model, we recommend using the `--distribute_modules` flag, which allocates the SAEs for different layers to different GPUs. Currently, we require that the number of GPUs evenly divides the number of layers you're training SAEs for.
 
 ```bash
-torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --distribute_layers --batch_size 1 --layer_stride 2 --grad_acc_steps 8 --ctx_len 2048 --k 192 --load_in_8bit --micro_acc_steps 2
+torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --distribute_modules --batch_size 1 --layer_stride 2 --grad_acc_steps 8 --ctx_len 2048 --k 192 --load_in_8bit --micro_acc_steps 2
 ```
 
 The above command trains an SAE for every _even_ layer of Llama 3 8B, using all available GPUs. It accumulates gradients over 8 minibatches, and splits each minibatch into 2 microbatches before feeding them into the SAE encoder, thus saving a lot of memory. It also loads the model in 8-bit precision using `bitsandbytes`. This command requires no more than 48GB of memory per GPU on an 8 GPU node.
@@ -107,10 +123,7 @@ The above command trains an SAE for every _even_ layer of Llama 3 8B, using all 
 ## TODO
 
 There are several features that we'd like to add in the near future:
-- [x] Distributed Data Parallel (HIGH PRIORITY)
-- [x] Implement AuxK loss for preventing dead latents (HIGH PRIORITY)
-- [x] Sharding / tensor parallelism for the SAEs (and model too?)
-- [x] Support for skipping layers
+- [ ] Finetuning pretrained SAEs
 - [ ] Support for caching activations
 - [ ] Evaluate SAEs with KL divergence when grafted into the model
 

@@ -1,15 +1,13 @@
+import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
-import os
+from multiprocessing import cpu_count
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
-from multiprocessing import cpu_count
 from simple_parsing import field, parse
-from transformers import (
-    AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
-)
+from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from .data import chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
@@ -46,9 +44,6 @@ class RunConfig(TrainConfig):
     )
     """Number of processes to use for preprocessing data"""
 
-    attn_implementation: str = "sdpa"
-    """Which implementation to use for attention in `transformers`. Pythia models require "eager"."""
-
 
 def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset]:
     if args.load_in_8bit:
@@ -60,7 +55,6 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
 
     model = AutoModel.from_pretrained(
         args.model,
-        attn_implementation=args.attn_implementation,
         device_map={"": f"cuda:{rank}"},
         quantization_config=(
             BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
@@ -85,10 +79,14 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
         else:
             raise e
 
+    assert isinstance(dataset, Dataset)
     if "input_ids" not in dataset.column_names:
         tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
         dataset = chunk_and_tokenize(
-            dataset, tokenizer, max_seq_len=args.ctx_len, num_proc=args.data_preprocessing_num_proc
+            dataset,
+            tokenizer,
+            max_seq_len=args.ctx_len,
+            num_proc=args.data_preprocessing_num_proc,
         )
     else:
         print("Dataset already tokenized; skipping tokenization.")
