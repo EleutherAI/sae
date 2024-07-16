@@ -2,6 +2,7 @@ import os
 from typing import Any, Type, TypeVar, cast
 
 import torch
+from accelerate.utils import send_to_device
 from torch import Tensor, nn
 from transformers import PreTrainedModel
 
@@ -56,6 +57,37 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
     assert len(candidates) == 1, "Could not find the list of layers."
 
     return candidates[0]
+
+
+@torch.inference_mode()
+def resolve_widths(
+    model: PreTrainedModel, module_names: list[str], dim: int = -1,
+) -> dict[str, int]:
+    """Find number of output dimensions for the specified modules."""
+    module_to_name = {
+        model.get_submodule(name): name for name in module_names
+    }
+    shapes: dict[str, int] = {}
+
+    def hook(module, _, output):
+        # Unpack tuples if needed
+        if isinstance(output, tuple):
+            output, *_ = output
+
+        name = module_to_name[module]
+        shapes[name] = output.shape[dim]
+
+    handles = [
+        mod.register_forward_hook(hook) for mod in module_to_name
+    ]
+    dummy = send_to_device(model.dummy_inputs, model.device)
+    try:
+        model(**dummy)
+    finally:
+        for handle in handles:
+            handle.remove()
+    
+    return shapes
 
 
 # Fallback implementation of SAE decoder

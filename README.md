@@ -88,6 +88,22 @@ trainer = SaeTrainer(cfg, tokenized, gpt)
 trainer.fit()
 ```
 
+## Custom hookpoints
+
+By default, the SAEs are trained on the residual stream activations of the model. However, you can also train SAEs on the activations of any other submodule(s) by specifying custom hookpoint patterns. These patterns are like standard PyTorch module names (e.g. `h.0.ln_1`) but also allow [Unix pattern matching syntax](https://docs.python.org/3/library/fnmatch.html), including wildcards and character sets. For example, to train SAEs on the output of every attention module and the inner activations of every MLP in GPT-2, you can use the following code:
+
+```bash
+python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.*.attn" "h.*.mlp.act"
+```
+
+To restrict to the first three layers:
+
+```bash
+python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.[012].attn" "h.[012].mlp.act"
+```
+
+We currently don't support fine-grained manual control over the learning rate, number of latents, or other hyperparameters on a hookpoint-by-hookpoint basis. By default, the `expansion_ratio` option is used to select the appropriate number of latents for each hookpoint based on the width of that hookpoint's output. The default learning rate for each hookpoint is then set using an inverse square root scaling law based on the number of latents. If you manually set the number of latents or the learning rate, it will be applied to all hookpoints.
+
 ## Distributed training
 
 We support distributed training via PyTorch's `torchrun` command. By default we use the Distributed Data Parallel method, which means that the weights of each SAE are replicated on every GPU.
@@ -107,10 +123,7 @@ The above command trains an SAE for every _even_ layer of Llama 3 8B, using all 
 ## TODO
 
 There are several features that we'd like to add in the near future:
-- [x] Distributed Data Parallel (HIGH PRIORITY)
-- [x] Implement AuxK loss for preventing dead latents (HIGH PRIORITY)
-- [x] Sharding / tensor parallelism for the SAEs (and model too?)
-- [x] Support for skipping layers
+- [ ] Finetuning pretrained SAEs
 - [ ] Support for caching activations
 - [ ] Evaluate SAEs with KL divergence when grafted into the model
 

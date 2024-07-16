@@ -51,9 +51,9 @@ class Sae(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        d_sae = cfg.num_latents or d_in * cfg.expansion_factor
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
+        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
 
         self.W_dec = nn.Parameter(self.encoder.weight.data.clone()) if decoder else None

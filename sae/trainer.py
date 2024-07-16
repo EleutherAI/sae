@@ -1,10 +1,10 @@
 from collections import defaultdict
 from dataclasses import asdict
-from fnmatch import fnmatchcase
 from typing import Sized
 
 import torch
 import torch.distributed as dist
+from fnmatch import fnmatchcase
 from natsort import natsorted
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -14,13 +14,11 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .sae import Sae
-from .utils import geometric_median, get_layer_list
+from .utils import geometric_median, get_layer_list, resolve_widths
 
 
 class SaeTrainer:
     def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
-        d_in = model.config.hidden_size
-
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -51,19 +49,33 @@ class SaeTrainer:
         num_examples = len(dataset)
 
         device = model.device
+        input_widths = resolve_widths(model, cfg.hookpoints)
+        unique_widths = set(input_widths.values())
+
+        if cfg.distribute_modules and len(unique_widths) > 1:
+            # dist.all_to_all requires tensors to have the same shape across ranks
+            raise ValueError(
+                f"All modules must output tensors of the same shape when using "
+                f"`distribute_modules=True`, got {unique_widths}"
+            )
+
         self.model = model
         self.saes = {
-            hook: Sae(d_in, cfg.sae, device) for hook in self.local_hookpoints()
+            hook: Sae(input_widths[hook], cfg.sae, device)
+            for hook in self.local_hookpoints()
         }
-        self.num_latents = cfg.sae.num_latents or d_in * cfg.sae.expansion_factor
 
-        # Auto-select LR using 1 / sqrt(d) scaling law from Figure 3 of the paper
-        if (lr := cfg.lr) is None:
-            # Base LR is 1e-4 for num latents = 2 ** 13
-            scale = self.num_latents / (2**14)
-
-            lr = 2e-4 / scale**0.5
-            print(f"Auto-selected LR: {lr:.2e}")
+        pgs = [
+            {
+                "params": sae.parameters(),
+                # Auto-select LR using 1 / sqrt(d) scaling law from Fig 3 of the paper
+                "lr": cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5
+            }
+            for sae in self.saes.values()
+        ]
+        # Dedup the learning rates we're using, sort them, round to 2 decimal places
+        lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
+        print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
 
         try:
             from bitsandbytes.optim import Adam8bit as Adam
@@ -75,9 +87,7 @@ class SaeTrainer:
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
-        self.optimizer = Adam(
-            (p for s in self.saes.values() for p in s.parameters()), lr=lr
-        )
+        self.optimizer = Adam(pgs)
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
@@ -118,12 +128,14 @@ class SaeTrainer:
         )
         pbar = tqdm(dl, desc="Training", disable=not rank_zero)
 
-        did_fire = defaultdict(
-            lambda: torch.zeros(self.num_latents, device=device, dtype=torch.bool)
-        )
-        num_tokens_since_fired = defaultdict(
-            lambda: torch.zeros(self.num_latents, device=device, dtype=torch.long)
-        )
+        did_fire = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
+            for name, sae in self.saes.items()
+        }
+        num_tokens_since_fired = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
+            for name, sae in self.saes.items()
+        }
         num_tokens_in_step = 0
 
         # For logging purposes
@@ -150,19 +162,19 @@ class SaeTrainer:
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
 
-            # Forward pass on the model to get the next batch of activations
-            with torch.no_grad():
-                handles = [
-                    mod.register_forward_hook(hook) for mod in name_to_module.values()
-                ]
-                try:
+            # Forward pass on the model to get the next batch of activations            
+            handles = [
+                mod.register_forward_hook(hook) for mod in name_to_module.values()
+            ]
+            try:
+                with torch.no_grad():
                     self.model(batch["input_ids"].to(device))
-                finally:
-                    for handle in handles:
-                        handle.remove()
+            finally:
+                for handle in handles:
+                    handle.remove()
 
-                if self.module_plan:
-                    hidden_dict = self.scatter_hiddens(hidden_dict)
+            if self.cfg.distribute_modules:
+                hidden_dict = self.scatter_hiddens(hidden_dict)
 
             for name, hiddens in hidden_dict.items():
                 raw = self.saes[name]  # 'raw' never has a DDP wrapper
@@ -245,8 +257,10 @@ class SaeTrainer:
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
 
-                    did_fire.clear()
+                    # Reset stats for this step
                     num_tokens_in_step = 0
+                    for mask in did_fire.values():
+                        mask.zero_()
 
                 if (
                     self.cfg.log_to_wandb
@@ -323,7 +337,7 @@ class SaeTrainer:
     def distribute_modules(self):
         """Prepare a plan for distributing modules across ranks."""
         if not self.cfg.distribute_modules:
-            self.module_plan = {}
+            self.module_plan = []
             print(f"Training on modules: {self.cfg.hookpoints}")
             return
 
@@ -331,13 +345,11 @@ class SaeTrainer:
         assert rem == 0, "Number of modules must be divisible by world size"
 
         # Each rank gets a subset of the layers
-        self.module_plan = {
-            rank: self.cfg.hookpoints[start : start + layers_per_rank]
-            for rank, start in enumerate(
-                range(0, len(self.cfg.hookpoints), layers_per_rank)
-            )
-        }
-        for rank, modules in self.module_plan.items():
+        self.module_plan = [
+            self.cfg.hookpoints[start : start + layers_per_rank]
+            for start in range(0, len(self.cfg.hookpoints), layers_per_rank)
+        ]
+        for rank, modules in enumerate(self.module_plan):
             print(f"Rank {rank} modules: {modules}")
 
     def scatter_hiddens(self, hidden_dict: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -345,7 +357,7 @@ class SaeTrainer:
         outputs = [
             # Add a new leading "layer" dimension to each tensor
             torch.stack([hidden_dict[hook] for hook in hookpoints], dim=1)
-            for hookpoints in self.module_plan.values()
+            for hookpoints in self.module_plan
         ]
         local_hooks = self.module_plan[dist.get_rank()]
         shape = next(iter(hidden_dict.values())).shape
