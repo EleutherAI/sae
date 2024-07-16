@@ -1,6 +1,19 @@
-from torch import Tensor
 import os
+from typing import Any, Type, TypeVar, cast
+
 import torch
+from torch import Tensor, nn
+from transformers import PreTrainedModel
+
+T = TypeVar("T")
+
+
+def assert_type(typ: Type[T], obj: Any) -> T:
+    """Assert that an object is of a given type at runtime and return it."""
+    if not isinstance(obj, typ):
+        raise TypeError(f"Expected {typ.__name__}, got {type(obj).__name__}")
+
+    return cast(typ, obj)
 
 
 @torch.no_grad()
@@ -32,6 +45,19 @@ def geometric_median(points: Tensor, max_iter: int = 100, tol: float = 1e-5):
     return guess
 
 
+def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
+    """Get the list of layers to train SAEs on."""
+    N = assert_type(int, model.config.num_hidden_layers)
+    candidates = [
+        (name, mod)
+        for (name, mod) in model.named_modules()
+        if isinstance(mod, nn.ModuleList) and len(mod) == N
+    ]
+    assert len(candidates) == 1, "Could not find the list of layers."
+
+    return candidates[0]
+
+
 # Fallback implementation of SAE decoder
 def eager_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
     buf = top_acts.new_zeros(top_acts.shape[:-1] + (W_dec.shape[-1],))
@@ -42,6 +68,7 @@ def eager_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
 # Triton implementation of SAE decoder
 def triton_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
     return TritonDecoder.apply(top_indices, top_acts, W_dec)
+
 
 try:
     from .kernels import TritonDecoder
