@@ -389,7 +389,7 @@ class SaeTrainer:
         ):
             print("Saving checkpoint")
 
-            for hook, sae in zip(self.local_hookpoints(), self.saes):
+            for hook, sae in self.saes.items():
                 assert isinstance(sae, Sae)
 
                 path = self.cfg.run_name or "checkpoints"
