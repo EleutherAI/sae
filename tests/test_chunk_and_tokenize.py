@@ -1,7 +1,7 @@
 import pytest
 from transformers import GPT2TokenizerFast
 from datasets import Dataset
-from sae.data import chunk_and_tokenize  # Replace 'mymodule' with the actual module name
+from sae.data import chunk_and_tokenize
 
 @pytest.fixture
 def setup_data():

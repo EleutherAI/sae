@@ -1,6 +1,5 @@
 """Tools for tokenizing and manipulating text datasets."""
 
-import os
 import math
 from multiprocessing import cpu_count
 from typing import TypeVar, Union
@@ -91,7 +90,6 @@ def chunk_and_tokenize(
                     leftovers.append(new_leftover)
 
             output = {k: v[:len(output['input_ids'])] for k, v in output.items()}
-
 
 
         output_batch_size = len(output["input_ids"])
