@@ -1,5 +1,6 @@
 """Tools for tokenizing and manipulating text datasets."""
 
+import os
 import math
 from multiprocessing import cpu_count
 from typing import TypeVar, Union
@@ -20,6 +21,7 @@ def chunk_and_tokenize(
     max_seq_len: int = 2048,
     return_final_batch: bool = False,
     load_from_cache_file: bool = True,
+    batch_size: int = 2048,
 ) -> T:
     """Perform GPT-style chunking and tokenization on a dataset.
 
@@ -43,7 +45,7 @@ def chunk_and_tokenize(
         The chunked and tokenized dataset.
     """
 
-    def _tokenize_fn(x: dict[str, list]):
+    def _tokenize_fn(x: dict[str, list], leftovers: list=[]):
         chunk_size = min(tokenizer.model_max_length, max_seq_len)
         sep = tokenizer.eos_token or "<|endoftext|>"
         joined_text = sep.join([""] + x[text_key])
@@ -67,10 +69,30 @@ def chunk_and_tokenize(
             ]
             output = {"input_ids": chunks}
 
-        if not return_final_batch:
-            # We know that the last sample will almost always be less than the max
-            # number of tokens, and we don't want to pad, so we just drop it.
-            output = {k: v[:-1] for k, v in output.items()}
+        if (not return_final_batch) and len(output["input_ids"][-1]) != chunk_size:
+            # we do not pad so if the last batch is smaller than the required
+            # batch size we either lengthen it using leftover batches or put
+            # it in the basket of leftovers
+            final_chunk = output["input_ids"].pop()
+            
+            while len(final_chunk) < chunk_size:
+                if len(leftovers) == 0:
+                    leftovers.append(final_chunk)
+                    break
+                
+                leftover = leftovers.pop()
+                final_chunk.extend([tokenizer.eos_token_id] + leftover)
+            else:
+                new_leftover = final_chunk[chunk_size:]
+                final_chunk = final_chunk[:chunk_size]
+                output["input_ids"].append(final_chunk)
+                
+                if len(new_leftover) > 0:
+                    leftovers.append(new_leftover)
+
+            output = {k: v[:len(output['input_ids'])] for k, v in output.items()}
+
+
 
         output_batch_size = len(output["input_ids"])
 
@@ -89,10 +111,11 @@ def chunk_and_tokenize(
         # since we always throw away the last element of the batch we
         # want to keep the batch size as large as possible
         batched=True,
-        batch_size=2048,
+        batch_size=batch_size,
         num_proc=num_proc,
         remove_columns=get_columns_all_equal(data),
         load_from_cache_file=load_from_cache_file,
+        fn_kwargs={} if return_final_batch else {"leftovers": []}
     )
     return data.with_format(format, columns=["input_ids"])
 
