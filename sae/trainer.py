@@ -25,7 +25,11 @@ class SaeTrainer:
             # Replace wildcard patterns
             raw_hookpoints = []
             for name, _ in model.named_modules():
-                if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
+                if any(
+                    # Remove the magic "-pre" suffix if needed
+                    fnmatchcase(name, pat.removesuffix("-pre"))
+                    for pat in cfg.hookpoints
+                ):
                     raw_hookpoints.append(name)
 
             # Natural sort to impose a consistent order
@@ -143,17 +147,30 @@ class SaeTrainer:
         avg_fvu = defaultdict(float)
 
         hidden_dict: dict[str, Tensor] = {}
-        name_to_module = {
-            name: self.model.get_submodule(name) for name in self.cfg.hookpoints
+        posthook_to_module = {
+            name: self.model.get_submodule(name)
+            for name in self.cfg.hookpoints
+            if not name.endswith("-pre")
         }
-        module_to_name = {v: k for k, v in name_to_module.items()}
+        prehook_to_module = {
+            name: self.model.get_submodule(name)
+            for name in self.cfg.hookpoints
+            if name.endswith("-pre")
+        }
+        module_to_posthook = {v: k for k, v in posthook_to_module.items()}
+        module_to_prehook = {v: k for k, v in prehook_to_module.items()}
 
-        def hook(module: nn.Module, _, outputs):
-            # Maybe unpack tuple outputs
+        def pre_hook(module: nn.Module, inputs: tuple):
+            """Save the input tensors for the module before `forward` is run."""
+            name = module_to_prehook[module]
+            hidden_dict[name] = inputs[0].flatten(0, 1)
+
+        def post_hook(module: nn.Module, _, outputs):
+            """Save the output tensors for the module after `forward` is run."""
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
 
-            name = module_to_name[module]
+            name = module_to_posthook[module]
             hidden_dict[name] = outputs.flatten(0, 1)
 
         for i, batch in enumerate(pbar):
@@ -161,12 +178,18 @@ class SaeTrainer:
 
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
-
-            # Forward pass on the model to get the next batch of activations            
+      
             handles = [
-                mod.register_forward_hook(hook) for mod in name_to_module.values()
+                mod.register_forward_hook(post_hook)
+                for mod in posthook_to_module.values()
+            ] + [
+                mod.register_forward_pre_hook(pre_hook)
+                for mod in prehook_to_module.values()
             ]
+            # Use a try... finally block to ensure the hooks are removed even if there
+            # is an exception during the forward pass
             try:
+                # Forward pass on the model to get the next batch of activations
                 with torch.no_grad():
                     self.model(batch["input_ids"].to(device))
             finally:

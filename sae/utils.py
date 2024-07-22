@@ -63,19 +63,29 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 def resolve_widths(
     model: PreTrainedModel, module_names: list[str], dim: int = -1,
 ) -> dict[str, int]:
-    """Find number of output dimensions for the specified modules."""
+    """Find number of output dimensions for the specified modules.
+    
+    This function also supports the magic suffix `-pre` which indicates that the width
+    of the input to the specified module should also be recorded.
+    """
     module_to_name = {
-        model.get_submodule(name): name for name in module_names
+        model.get_submodule(name.removesuffix("-pre")): name
+        for name in module_names
     }
-    shapes: dict[str, int] = {}
+    widths: dict[str, int] = {}
 
-    def hook(module, _, output):
+    def hook(module: nn.Module, inputs: tuple, output):
         # Unpack tuples if needed
         if isinstance(output, tuple):
             output, *_ = output
 
         name = module_to_name[module]
-        shapes[name] = output.shape[dim]
+        widths[name] = output.shape[dim]
+
+        # Also record the width of the input if necessary
+        input_name = name + "-pre"
+        if input_name in module_to_name:
+            widths[input_name] = inputs[0].shape[dim]
 
     handles = [
         mod.register_forward_hook(hook) for mod in module_to_name
@@ -87,7 +97,7 @@ def resolve_widths(
         for handle in handles:
             handle.remove()
     
-    return shapes
+    return widths
 
 
 # Fallback implementation of SAE decoder
