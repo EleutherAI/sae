@@ -32,7 +32,6 @@ def triton_sparse_transpose_dense_matmul(
 
     K = sparse_indices.shape[1]
     A = dense.shape[0]
-    dense.shape[1]
     assert sparse_indices.shape[0] == A
 
     # COO-format and sorted
