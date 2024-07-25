@@ -63,7 +63,7 @@ class Sae(nn.Module):
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
     @staticmethod
-    def load_many_from_hub(
+    def load_many(
         name: str,
         local: bool = False,
         layers: list[str] | None = None,
