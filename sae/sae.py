@@ -63,8 +63,10 @@ class Sae(nn.Module):
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
     @staticmethod
-    def load_many_from_hub(
+    def load_many(
         name: str,
+        local: bool = False,
+        layers: list[str] | None = None,
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
@@ -72,16 +74,24 @@ class Sae(nn.Module):
     ) -> dict[str, "Sae"]:
         """Load SAEs for multiple hookpoints on a single model and dataset."""
         pattern = pattern + "/*" if pattern is not None else None
-        repo_path = Path(snapshot_download(name, allow_patterns=pattern))
+        if local:
+            repo_path = Path(name)
+        else:
+            repo_path = Path(snapshot_download(name, allow_patterns=pattern))
 
+        if layers is not None:
+            return {
+                layer: Sae.load_from_disk(repo_path / layer, device=device, decoder=decoder)
+                for layer in natsorted(layers)
+            }
         files = [
             f
             for f in repo_path.iterdir()
             if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
         ]
         return {
-            f.stem: Sae.load_from_disk(f, device=device, decoder=decoder)
-            for f in natsorted(files, key=lambda f: f.stem)
+            f.name: Sae.load_from_disk(f, device=device, decoder=decoder)
+            for f in natsorted(files, key=lambda f: f.name)
         }
 
     @staticmethod
