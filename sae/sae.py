@@ -133,7 +133,6 @@ class Sae(nn.Module):
             cfg = SaeConfig(**cfg_dict)
 
         sae = Sae(d_in, cfg, device=device, decoder=decoder)
-        print(f"Loading SAE from {path}")
         load_model(
             model=sae,
             filename=str(path / "sae.safetensors"),
