@@ -3,8 +3,6 @@ This library trains _k_-sparse autoencoders (SAEs) on the residual stream activa
 
 This is a lean, simple library with few configuration options. Unlike most other SAE libraries (e.g. [SAELens](https://github.com/jbloomAus/SAELens), it does not cache activations on disk, but rather computes them on-the-fly. This allows us to scale to very large models and datasets with zero storage overhead, but has the downside that trying different hyperparameters for the same model and dataset will be slower than if we cached activations (since activations will be re-computed). We may add caching as an option in the future.
 
-Unlike other libraries, we also train an SAE for _every_ layer of the network at once, rather than choosing a single layer to focus on. We will likely add the option to skip layers in the near future.
-
 Following Gao et al., we use a TopK activation function which directly enforces a desired level of sparsity in the activations. This is in contrast to other libraries which use an L1 penalty in the loss function. We believe TopK is a Pareto improvement over the L1 approach, and hence do not plan on supporting it.
 
 ## Loading pretrained SAEs
@@ -17,14 +15,14 @@ from sae import Sae
 sae = Sae.load_from_hub("EleutherAI/sae-llama-3-8b-32x", hookpoint="layers.10")
 ```
 
-This will load the SAE for residual stream layer 10 of Llama 3 8B, which was trained with an expansion factor of 32. You can also load the SAEs for all layers at once using `Sae.load_many_from_hub`:
+This will load the SAE for residual stream layer 10 of Llama 3 8B, which was trained with an expansion factor of 32. You can also load the SAEs for all layers at once using `Sae.load_many`:
 
 ```python
-saes = Sae.load_many_from_hub("EleutherAI/sae-llama-3-8b-32x")
+saes = Sae.load_many("EleutherAI/sae-llama-3-8b-32x")
 saes["layers.10"]
 ```
 
-The dictionary returned by `load_many_from_hub` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `embed_tokens`, `layers.0`, ..., `layers.n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
+The dictionary returned by `load_many` is guaranteed to be [naturally sorted](https://en.wikipedia.org/wiki/Natural_sort_order) by the name of the hook point. For the common case where the hook points are named `embed_tokens`, `layers.0`, ..., `layers.n`, this means that the SAEs will be sorted by layer number. We can then gather the SAE activations for a model forward pass as follows:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
