@@ -9,7 +9,7 @@ from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from .data import chunk_and_tokenize
+from .data import chunk_and_tokenize, MemmapDataset
 from .trainer import SaeTrainer, TrainConfig
 
 
@@ -39,13 +39,16 @@ class RunConfig(TrainConfig):
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
+    max_examples: int | None = None
+    """Maximum number of examples to use for training."""
+
     data_preprocessing_num_proc: int = field(
         default_factory=lambda: cpu_count() // 2,
     )
     """Number of processes to use for preprocessing data"""
 
 
-def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset]:
+def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -65,31 +68,40 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
         token=args.hf_token,
     )
 
-    try:
-        dataset = load_dataset(
-            args.dataset,
-            split=args.split,
-            # TODO: Maybe set this to False by default? But RPJ requires it.
-            trust_remote_code=True,
-        )
-    except ValueError as e:
-        # Automatically use load_from_disk if appropriate
-        if "load_from_disk" in str(e):
-            dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
-        else:
-            raise e
-
-    assert isinstance(dataset, Dataset)
-    if "input_ids" not in dataset.column_names:
-        tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-        dataset = chunk_and_tokenize(
-            dataset,
-            tokenizer,
-            max_seq_len=args.ctx_len,
-            num_proc=args.data_preprocessing_num_proc,
-        )
+    # For memmap-style datasets
+    if args.dataset.endswith(".bin"):
+        dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
     else:
-        print("Dataset already tokenized; skipping tokenization.")
+        # For Huggingface datasets
+        try:
+            dataset = load_dataset(
+                args.dataset,
+                split=args.split,
+                # TODO: Maybe set this to False by default? But RPJ requires it.
+                trust_remote_code=True,
+            )
+        except ValueError as e:
+            # Automatically use load_from_disk if appropriate
+            if "load_from_disk" in str(e):
+                dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
+            else:
+                raise e
+
+        assert isinstance(dataset, Dataset)
+        if "input_ids" not in dataset.column_names:
+            tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+            dataset = chunk_and_tokenize(
+                dataset,
+                tokenizer,
+                max_seq_len=args.ctx_len,
+                num_proc=args.data_preprocessing_num_proc,
+            )
+        else:
+            print("Dataset already tokenized; skipping tokenization.")
+
+        dataset = dataset.with_format("torch")
+        if limit := args.max_examples:
+            dataset = dataset.select(range(limit))
 
     return model, dataset
 
