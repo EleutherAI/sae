@@ -200,7 +200,7 @@ class Sae(nn.Module):
         e = sae_out - x
 
         # Used as a denominator for putting everything on a reasonable scale
-        total_variance = (x - x.mean(0)).pow(2).sum(0)
+        total_variance = (x - x.mean(0)).pow(2).sum()
 
         # Second decoder pass for AuxK loss
         if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
@@ -220,13 +220,13 @@ class Sae(nn.Module):
             # Encourage the top ~50% of dead latents to predict the residual of the
             # top k living latents
             e_hat = self.decode(auxk_acts, auxk_indices)
-            auxk_loss = (e_hat - e).pow(2).sum(0)
-            auxk_loss = scale * torch.mean(auxk_loss / total_variance)
+            auxk_loss = (e_hat - e).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
         else:
             auxk_loss = sae_out.new_tensor(0.0)
 
-        l2_loss = e.pow(2).sum(0)
-        fvu = torch.mean(l2_loss / total_variance)
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
 
         return ForwardOutput(
             sae_out,
