@@ -142,7 +142,14 @@ class MemmapDataset(TorchDataset):
             input_ids=torch.from_numpy(self.mmap[idx].astype(np.int64))
         )
     
+    def select(self, rng: range) -> "MemmapDataset":
+        """Select a subset of the dataset."""
+        mmap = MemmapDataset.__new__(MemmapDataset)
+        mmap.mmap = self.mmap[rng.start:rng.stop]
+        return mmap
+
     def shard(self, num_shards: int, shard_id: int) -> "MemmapDataset":
+        """Split the dataset into `num_shards` and return the `shard_id`-th shard."""
         mmap = MemmapDataset.__new__(MemmapDataset)
 
         # Split the mmap array into `num_shards` and return the `shard_id`-th shard
