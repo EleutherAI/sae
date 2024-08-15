@@ -102,17 +102,20 @@ class SaeTrainer:
         """Load the trainer state from disk."""
         device = self.model.device
 
-        lr_state = torch.load(f"{path}/lr_scheduler.pt", map_location=device)
-        opt_state = torch.load(f"{path}/optimizer.pt", map_location=device)
-        train_state = torch.load(f"{path}/state.pt", map_location=device)
-
+        # Load the train state first so we can print the step number
+        train_state = torch.load(f"{path}/state.pt", map_location=device, weights_only=True)
         self.global_step = train_state["global_step"]
         self.num_tokens_since_fired = train_state["num_tokens_since_fired"]
+
+        print(f"\033[92mResuming training at step {self.global_step} from '{path}'\033[0m")
+
+        lr_state = torch.load(f"{path}/lr_scheduler.pt", map_location=device, weights_only=True)
+        opt_state = torch.load(f"{path}/optimizer.pt", map_location=device, weights_only=True)
         self.optimizer.load_state_dict(opt_state)
         self.lr_scheduler.load_state_dict(lr_state)
 
         for name, sae in self.saes.items():
-            load_model(sae, f"{path}/{name}", device=str(device))
+            load_model(sae, f"{path}/{name}/sae.safetensors", device=str(device))
 
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
@@ -142,9 +145,18 @@ class SaeTrainer:
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
+        num_batches = len(self.dataset) // self.cfg.batch_size
+        if self.global_step > 0:
+            assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
+
+            n = self.global_step * self.cfg.batch_size
+            ds = self.dataset.select(range(n, len(self.dataset)))  # type: ignore
+        else:
+            ds = self.dataset
+
         device = self.model.device
         dl = DataLoader(
-            self.dataset,
+            ds,
             batch_size=self.cfg.batch_size,
             # NOTE: We do not shuffle here for reproducibility; the dataset should
             # be shuffled before passing it to the trainer.
@@ -154,7 +166,7 @@ class SaeTrainer:
             desc="Training", 
             disable=not rank_zero, 
             initial=self.global_step, 
-            total=len(dl),
+            total=num_batches,
         )
 
         did_fire = {
@@ -171,6 +183,7 @@ class SaeTrainer:
         name_to_module = {
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
+        maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, _, outputs):
@@ -214,6 +227,7 @@ class SaeTrainer:
                     median = geometric_median(self.maybe_all_cat(hiddens))
                     raw.b_dec.data = median.to(raw.dtype)
 
+                if not maybe_wrapped:
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
                     # after we set the decoder bias, otherwise DDP will not register
                     # gradients flowing to the bias after the first step.
@@ -420,14 +434,14 @@ class SaeTrainer:
                 assert isinstance(sae, Sae)
 
                 sae.save_to_disk(f"{path}/{hook}")
-        
+    
         if rank_zero:
-            torch.save(self.lr_scheduler.state_dict(), "lr_scheduler.pt")
-            torch.save(self.optimizer.state_dict(), "optimizer.pt")
+            torch.save(self.lr_scheduler.state_dict(), f"{path}/lr_scheduler.pt")
+            torch.save(self.optimizer.state_dict(), f"{path}/optimizer.pt")
             torch.save({
                 "global_step": self.global_step,
                 "num_tokens_since_fired": self.num_tokens_since_fired,
-            }, "state.pt")
+            }, f"{path}/state.pt")
 
             self.cfg.save_json(f"{path}/config.json")
 

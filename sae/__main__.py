@@ -42,8 +42,8 @@ class RunConfig(TrainConfig):
     max_examples: int | None = None
     """Maximum number of examples to use for training."""
 
-    resume: str | None = None
-    """Path to a checkpoint to resume training from."""
+    resume: bool = False
+    """Whether to try resuming from the checkpoint present at `run_name`."""
 
     seed: int = 42
     """Random seed for shuffling the dataset."""
@@ -145,8 +145,7 @@ def run():
 
         trainer = SaeTrainer(args, dataset, model)
         if args.resume:
-            print(f"Resuming training from '{args.resume}'")
-            trainer.load_state(args.resume)
+            trainer.load_state(args.run_name or "sae-ckpts")
 
         trainer.fit()
 
