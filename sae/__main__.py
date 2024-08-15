@@ -76,9 +76,6 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
-        print("Loading dataset from memmap file.")
-        print("WARNING: Please ensure the memmap is already shuffled on disk.")
-
         dataset = MemmapDataset(args.dataset, args.ctx_len, args.max_examples)
     else:
         # For Huggingface datasets
