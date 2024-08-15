@@ -4,22 +4,26 @@ from typing import Sized
 
 import torch
 import torch.distributed as dist
+from datasets import Dataset as HfDataset
 from fnmatch import fnmatchcase
 from natsort import natsorted
 from safetensors.torch import load_model
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
+from .data import MemmapDataset
 from .sae import Sae
 from .utils import geometric_median, get_layer_list, resolve_widths
 
 
 class SaeTrainer:
-    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
+    def __init__(
+        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel
+    ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -156,7 +160,7 @@ class SaeTrainer:
 
         device = self.model.device
         dl = DataLoader(
-            ds,
+            ds, # type: ignore
             batch_size=self.cfg.batch_size,
             # NOTE: We do not shuffle here for reproducibility; the dataset should
             # be shuffled before passing it to the trainer.
