@@ -4,21 +4,26 @@ from typing import Sized
 
 import torch
 import torch.distributed as dist
+from datasets import Dataset as HfDataset
 from fnmatch import fnmatchcase
 from natsort import natsorted
+from safetensors.torch import load_model
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
+from .data import MemmapDataset
 from .sae import Sae
 from .utils import geometric_median, get_layer_list, resolve_widths
 
 
 class SaeTrainer:
-    def __init__(self, cfg: TrainConfig, dataset: Dataset, model: PreTrainedModel):
+    def __init__(
+        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel
+    ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -87,10 +92,34 @@ class SaeTrainer:
             print("bitsandbytes 8-bit Adam not available, using torch.optim.Adam")
             print("Run `pip install bitsandbytes` for less memory usage.")
 
+        self.global_step = 0
+        self.num_tokens_since_fired = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
+            for name, sae in self.saes.items()
+        }
         self.optimizer = Adam(pgs)
         self.lr_scheduler = get_linear_schedule_with_warmup(
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
+
+    def load_state(self, path: str):
+        """Load the trainer state from disk."""
+        device = self.model.device
+
+        # Load the train state first so we can print the step number
+        train_state = torch.load(f"{path}/state.pt", map_location=device, weights_only=True)
+        self.global_step = train_state["global_step"]
+        self.num_tokens_since_fired = train_state["num_tokens_since_fired"]
+
+        print(f"\033[92mResuming training at step {self.global_step} from '{path}'\033[0m")
+
+        lr_state = torch.load(f"{path}/lr_scheduler.pt", map_location=device, weights_only=True)
+        opt_state = torch.load(f"{path}/optimizer.pt", map_location=device, weights_only=True)
+        self.optimizer.load_state_dict(opt_state)
+        self.lr_scheduler.load_state_dict(lr_state)
+
+        for name, sae in self.saes.items():
+            load_model(sae, f"{path}/{name}/sae.safetensors", device=str(device))
 
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
@@ -120,20 +149,32 @@ class SaeTrainer:
         print(f"Number of SAE parameters: {num_sae_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
+        num_batches = len(self.dataset) // self.cfg.batch_size
+        if self.global_step > 0:
+            assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
+
+            n = self.global_step * self.cfg.batch_size
+            ds = self.dataset.select(range(n, len(self.dataset)))  # type: ignore
+        else:
+            ds = self.dataset
+
         device = self.model.device
         dl = DataLoader(
-            self.dataset,
+            ds, # type: ignore
             batch_size=self.cfg.batch_size,
-            shuffle=True,
+            # NOTE: We do not shuffle here for reproducibility; the dataset should
+            # be shuffled before passing it to the trainer.
+            shuffle=False,
         )
-        pbar = tqdm(dl, desc="Training", disable=not rank_zero)
+        pbar = tqdm(
+            desc="Training", 
+            disable=not rank_zero, 
+            initial=self.global_step, 
+            total=num_batches,
+        )
 
         did_fire = {
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
-            for name, sae in self.saes.items()
-        }
-        num_tokens_since_fired = {
-            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
             for name, sae in self.saes.items()
         }
         num_tokens_in_step = 0
@@ -146,6 +187,7 @@ class SaeTrainer:
         name_to_module = {
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
+        maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, _, outputs):
@@ -156,7 +198,7 @@ class SaeTrainer:
             name = module_to_name[module]
             hidden_dict[name] = outputs.flatten(0, 1)
 
-        for i, batch in enumerate(pbar):
+        for batch in dl:
             hidden_dict.clear()
 
             # Bookkeeping for dead feature detection
@@ -180,7 +222,7 @@ class SaeTrainer:
                 raw = self.saes[name]  # 'raw' never has a DDP wrapper
 
                 # On the first iteration, initialize the decoder bias
-                if i == 0:
+                if self.global_step == 0:
                     # NOTE: The all-cat here could conceivably cause an OOM in some
                     # cases, but it's unlikely to be a problem with small world sizes.
                     # We could avoid this by "approximating" the geometric median
@@ -189,6 +231,7 @@ class SaeTrainer:
                     median = geometric_median(self.maybe_all_cat(hiddens))
                     raw.b_dec.data = median.to(raw.dtype)
 
+                if not maybe_wrapped:
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
                     # after we set the decoder bias, otherwise DDP will not register
                     # gradients flowing to the bias after the first step.
@@ -214,7 +257,7 @@ class SaeTrainer:
                     out = wrapped(
                         chunk,
                         dead_mask=(
-                            num_tokens_since_fired[name]
+                            self.num_tokens_since_fired[name]
                             > self.cfg.dead_feature_threshold
                             if self.cfg.auxk_alpha > 0
                             else None
@@ -240,7 +283,7 @@ class SaeTrainer:
                 torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
             # Check if we need to actually do a training step
-            step, substep = divmod(i + 1, self.cfg.grad_acc_steps)
+            step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
                 if self.cfg.sae.normalize_decoder:
                     for sae in self.saes.values():
@@ -253,7 +296,7 @@ class SaeTrainer:
                 ###############
                 with torch.no_grad():
                     # Update the dead feature mask
-                    for name, counts in num_tokens_since_fired.items():
+                    for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
 
@@ -270,7 +313,7 @@ class SaeTrainer:
 
                     for name in self.saes:
                         mask = (
-                            num_tokens_since_fired[name]
+                            self.num_tokens_since_fired[name]
                             > self.cfg.dead_feature_threshold
                         )
 
@@ -298,6 +341,9 @@ class SaeTrainer:
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
+                
+            self.global_step += 1
+            pbar.update()
 
         self.save()
         pbar.close()
@@ -382,18 +428,26 @@ class SaeTrainer:
     def save(self):
         """Save the SAEs to disk."""
 
-        if (
-            self.cfg.distribute_modules
-            or not dist.is_initialized()
-            or dist.get_rank() == 0
-        ):
+        path = self.cfg.run_name or "sae-ckpts"
+        rank_zero = not dist.is_initialized() or dist.get_rank() == 0
+
+        if rank_zero or self.cfg.distribute_modules:
             print("Saving checkpoint")
 
             for hook, sae in self.saes.items():
                 assert isinstance(sae, Sae)
 
-                path = self.cfg.run_name or "checkpoints"
                 sae.save_to_disk(f"{path}/{hook}")
+    
+        if rank_zero:
+            torch.save(self.lr_scheduler.state_dict(), f"{path}/lr_scheduler.pt")
+            torch.save(self.optimizer.state_dict(), f"{path}/optimizer.pt")
+            torch.save({
+                "global_step": self.global_step,
+                "num_tokens_since_fired": self.num_tokens_since_fired,
+            }, f"{path}/state.pt")
+
+            self.cfg.save_json(f"{path}/config.json")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():

@@ -42,6 +42,12 @@ class RunConfig(TrainConfig):
     max_examples: int | None = None
     """Maximum number of examples to use for training."""
 
+    resume: bool = False
+    """Whether to try resuming from the checkpoint present at `run_name`."""
+
+    seed: int = 42
+    """Random seed for shuffling the dataset."""
+
     data_preprocessing_num_proc: int = field(
         default_factory=lambda: cpu_count() // 2,
     )
@@ -99,6 +105,9 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
         else:
             print("Dataset already tokenized; skipping tokenization.")
 
+        print(f"Shuffling dataset with seed {args.seed}")
+        dataset = dataset.shuffle(args.seed)
+
         dataset = dataset.with_format("torch")
         if limit := args.max_examples:
             dataset = dataset.select(range(limit))
@@ -135,6 +144,9 @@ def run():
         print(f"Storing model weights in {model.dtype}")
 
         trainer = SaeTrainer(args, dataset, model)
+        if args.resume:
+            trainer.load_state(args.run_name or "sae-ckpts")
+
         trainer.fit()
 
 
