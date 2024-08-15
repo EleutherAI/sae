@@ -21,7 +21,8 @@ class SaeConfig(Serializable):
     k: int = 32
     """Number of nonzero features."""
 
-    signed: bool = False
+    multi_topk: bool = False
+    """Use Multi-TopK loss."""
 
 
 @dataclass
