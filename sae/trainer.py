@@ -182,6 +182,7 @@ class SaeTrainer:
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
+        avg_multi_topk_fvu = defaultdict(float)
 
         hidden_dict: dict[str, Tensor] = {}
         name_to_module = {
@@ -271,8 +272,12 @@ class SaeTrainer:
                         avg_auxk_loss[name] += float(
                             self.maybe_all_reduce(out.auxk_loss.detach()) / denom
                         )
+                    if self.cfg.sae.multi_topk:
+                        avg_multi_topk_fvu[name] += float(
+                            self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
+                        )
 
-                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
                     loss.div(acc_steps).backward()
 
                     # Update the did_fire mask
@@ -327,9 +332,12 @@ class SaeTrainer:
                         )
                         if self.cfg.auxk_alpha > 0:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
+                        if self.cfg.sae.multi_topk:
+                            info[f"multi_topk_fvu/{name}"] = avg_multi_topk_fvu[name]
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
+                    avg_multi_topk_fvu.clear()
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
