@@ -24,7 +24,9 @@ class SaeConfig(Serializable):
     multi_topk: bool = False
     """Use Multi-TopK loss."""
 
-
+    signed: bool = False
+    """DEPRECATED. Still needed for loading of legacy weights"""
+    
 @dataclass
 class TrainConfig(Serializable):
     sae: SaeConfig
