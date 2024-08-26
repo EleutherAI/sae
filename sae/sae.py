@@ -133,7 +133,7 @@ class Sae(nn.Module):
         with open(path / "cfg.json", "r") as f:
             cfg_dict = json.load(f)
             d_in = cfg_dict.pop("d_in")
-            cfg = SaeConfig(**cfg_dict)
+            cfg = SaeConfig.from_dict(cfg_dict, drop_extra_fields=True)
 
         sae = Sae(d_in, cfg, device=device, decoder=decoder)
         load_model(
