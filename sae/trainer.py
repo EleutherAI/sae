@@ -455,7 +455,7 @@ class SaeTrainer:
                 "num_tokens_since_fired": self.num_tokens_since_fired,
             }, f"{path}/state.pt")
 
-            self.cfg.save_json(f"{path}/config.json")
+            self.cfg.save_json(f"{path}/cfg.json")
 
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():
