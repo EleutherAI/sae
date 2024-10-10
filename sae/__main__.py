@@ -2,6 +2,7 @@ import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from multiprocessing import cpu_count
+from safetensors.torch import load_model
 
 import torch
 import torch.distributed as dist
@@ -36,6 +37,9 @@ class RunConfig(TrainConfig):
     hf_token: str | None = None
     """Huggingface API token for downloading models."""
 
+    revision: str | None = None
+    """Model revision to use for training."""
+
     load_in_8bit: bool = False
     """Load the model in 8-bit mode."""
 
@@ -44,6 +48,9 @@ class RunConfig(TrainConfig):
 
     resume: bool = False
     """Whether to try resuming from the checkpoint present at `run_name`."""
+
+    pretrained: str | None = None
+    """Path to pretrained SAEs to finetune."""
 
     seed: int = 42
     """Random seed for shuffling the dataset."""
@@ -70,6 +77,7 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
             if args.load_in_8bit
             else None
         ),
+        revision=args.revision,
         torch_dtype=dtype,
         token=args.hf_token,
     )
@@ -146,6 +154,9 @@ def run():
         trainer = SaeTrainer(args, dataset, model)
         if args.resume:
             trainer.load_state(args.run_name or "sae-ckpts")
+        elif args.pretrained:
+            for name, sae in trainer.saes.items():
+                load_model(sae, f"{args.pretrained}/{name}/sae.safetensors", device=str(model.device))
 
         trainer.fit()
 

@@ -180,7 +180,7 @@ class Sae(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
-        return self.select_topk(self.pre_acts(x))
+        return EncoderOutput(*self.select_topk(self.pre_acts(x)))
 
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
@@ -197,7 +197,11 @@ class Sae(nn.Module):
         e = sae_out - x
 
         # Used as a denominator for putting everything on a reasonable scale
+        # Resulted in overflow errors for float16
         total_variance = (x - x.mean(0)).pow(2).sum()
+        if not torch.isfinite(total_variance).all():
+            x_bf16 = x.to(torch.bfloat16)
+            total_variance = (x_bf16 - x_bf16.mean(0)).pow(2).sum()
 
         # Second decoder pass for AuxK loss
         if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
