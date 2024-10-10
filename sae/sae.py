@@ -180,7 +180,7 @@ class Sae(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
-        return self.select_topk(self.pre_acts(x))
+        return EncoderOutput(*self.select_topk(self.pre_acts(x)))
 
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
