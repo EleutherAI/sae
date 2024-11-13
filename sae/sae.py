@@ -188,21 +188,27 @@ class Sae(nn.Module):
         y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
-    def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
         pre_acts = self.pre_acts(x)
+
+        # If we aren't given a distinct target, we're autoencoding
+        if y is None:
+            y = x
 
         # Decode and compute residual
         top_acts, top_indices = self.select_topk(pre_acts)
         sae_out = self.decode(top_acts, top_indices)
-        e = sae_out - x
+        e = sae_out - y
 
         # Used as a denominator for putting everything on a reasonable scale
-        total_variance = (x - x.mean(0)).pow(2).sum()
+        total_variance = (y - y.mean(0)).pow(2).sum()
 
         # Second decoder pass for AuxK loss
         if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
             # Heuristic from Appendix B.1 in the paper
-            k_aux = x.shape[-1] // 2
+            k_aux = y.shape[-1] // 2
 
             # Reduce the scale of the loss if there are a small number of dead latents
             scale = min(num_dead / k_aux, 1.0)
@@ -229,7 +235,7 @@ class Sae(nn.Module):
             top_acts, top_indices = pre_acts.topk(4 * self.cfg.k, sorted=False)
             sae_out = self.decode(top_acts, top_indices)
 
-            multi_topk_fvu = (sae_out - x).pow(2).sum() / total_variance
+            multi_topk_fvu = (sae_out - y).pow(2).sum() / total_variance
         else:
             multi_topk_fvu = sae_out.new_tensor(0.0)
 

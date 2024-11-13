@@ -58,6 +58,9 @@ class TrainConfig(Serializable):
     layer_stride: int = 1
     """Stride between layers to train SAEs on."""
 
+    transcode: bool = False
+    """Predict the output of a module given its input."""
+
     distribute_modules: bool = False
     """Store a single copy of each SAE, instead of copying them across devices."""
 
