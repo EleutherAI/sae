@@ -184,23 +184,31 @@ class SaeTrainer:
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
 
-        hidden_dict: dict[str, Tensor] = {}
+        input_dict: dict[str, Tensor] = {}
+        output_dict: dict[str, Tensor] = {}
         name_to_module = {
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
         maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
-        def hook(module: nn.Module, _, outputs):
-            # Maybe unpack tuple outputs
+        def hook(module: nn.Module, inputs, outputs):
+            # Maybe unpack tuple inputs and outputs
+            if isinstance(inputs, tuple):
+                inputs = inputs[0]
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
 
             name = module_to_name[module]
-            hidden_dict[name] = outputs.flatten(0, 1)
+            output_dict[name] = outputs.flatten(0, 1)
+
+            # Remember the inputs if we're training a transcoder
+            if self.cfg.transcode:
+                input_dict[name] = inputs.flatten(0, 1)
 
         for batch in dl:
-            hidden_dict.clear()
+            input_dict.clear()
+            output_dict.clear()
 
             # Bookkeeping for dead feature detection
             num_tokens_in_step += batch["input_ids"].numel()
@@ -217,10 +225,13 @@ class SaeTrainer:
                     handle.remove()
 
             if self.cfg.distribute_modules:
-                hidden_dict = self.scatter_hiddens(hidden_dict)
+                input_dict = self.scatter_hiddens(input_dict)
+                output_dict = self.scatter_hiddens(output_dict)
 
-            for name, hiddens in hidden_dict.items():
-                raw = self.saes[name]  # 'raw' never has a DDP wrapper
+            for name, outputs in output_dict.items():
+                # 'inputs' is distinct from outputs iff we're transcoding
+                inputs = input_dict.get(name, outputs)
+                raw = self.saes[name]           # 'raw' never has a DDP wrapper
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:
@@ -229,7 +240,7 @@ class SaeTrainer:
                     # We could avoid this by "approximating" the geometric median
                     # across all ranks with the mean (median?) of the geometric medians
                     # on each rank. Not clear if that would hurt performance.
-                    median = geometric_median(self.maybe_all_cat(hiddens))
+                    median = geometric_median(self.maybe_all_cat(outputs))
                     raw.b_dec.data = median.to(raw.dtype)
 
                 if not maybe_wrapped:
@@ -254,9 +265,12 @@ class SaeTrainer:
                 wrapped = maybe_wrapped[name]
 
                 # Save memory by chunking the activations
-                for chunk in hiddens.chunk(self.cfg.micro_acc_steps):
+                in_chunks = inputs.chunk(self.cfg.micro_acc_steps)
+                out_chunks = outputs.chunk(self.cfg.micro_acc_steps)
+                for in_chunk, out_chunk in zip(in_chunks, out_chunks):
                     out = wrapped(
-                        chunk,
+                        x=in_chunk,
+                        y=out_chunk,
                         dead_mask=(
                             self.num_tokens_since_fired[name]
                             > self.cfg.dead_feature_threshold
@@ -408,6 +422,10 @@ class SaeTrainer:
 
     def scatter_hiddens(self, hidden_dict: dict[str, Tensor]) -> dict[str, Tensor]:
         """Scatter & gather the hidden states across ranks."""
+        # Short-circuit if we have no data
+        if not hidden_dict:
+            return hidden_dict
+
         outputs = [
             # Add a new leading "layer" dimension to each tensor
             torch.stack([hidden_dict[hook] for hook in hookpoints], dim=1)
