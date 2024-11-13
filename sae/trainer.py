@@ -240,8 +240,7 @@ class SaeTrainer:
                     # We could avoid this by "approximating" the geometric median
                     # across all ranks with the mean (median?) of the geometric medians
                     # on each rank. Not clear if that would hurt performance.
-                    sae_inputs = inputs if inputs is not None else outputs
-                    median = geometric_median(self.maybe_all_cat(sae_inputs))
+                    median = geometric_median(self.maybe_all_cat(outputs))
                     raw.b_dec.data = median.to(raw.dtype)
 
                 if not maybe_wrapped:
