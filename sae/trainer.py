@@ -69,6 +69,12 @@ class SaeTrainer:
             hook: Sae(input_widths[hook], cfg.sae, device)
             for hook in self.local_hookpoints()
         }
+        # Zero-initialize for transcoder training
+        # TODO: Further experiments to verify that this is actually the right thing
+        # Maybe add a flag for it
+        if cfg.transcode:
+            for sae in self.saes.values():
+                sae.W_dec.data.zero_()
 
         pgs = [
             {
@@ -256,8 +262,8 @@ class SaeTrainer:
                         else self.saes
                     )
 
-                # Make sure the W_dec is still unit-norm
-                if raw.cfg.normalize_decoder:
+                # Make sure the W_dec is still unit-norm if we're autoencoding
+                if raw.cfg.normalize_decoder and not self.cfg.transcode:
                     raw.set_decoder_norm_to_unit_norm()
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
@@ -304,7 +310,7 @@ class SaeTrainer:
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
-                if self.cfg.sae.normalize_decoder:
+                if self.cfg.sae.normalize_decoder and not self.cfg.transcode:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
