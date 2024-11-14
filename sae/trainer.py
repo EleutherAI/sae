@@ -69,12 +69,11 @@ class SaeTrainer:
             hook: Sae(input_widths[hook], cfg.sae, device)
             for hook in self.local_hookpoints()
         }
-        # Zero-initialize for transcoder training
-        # TODO: Further experiments to verify that this is actually the right thing
-        # Maybe add a flag for it
+        # Re-initialize the decoder for transcoder training. By default the Sae class
+        # initializes the decoder with the transpose of the encoder.
         if cfg.transcode:
             for sae in self.saes.values():
-                sae.W_dec.data.zero_()
+                torch.nn.init.kaiming_uniform_(sae.W_dec, a=5**0.5)
 
         pgs = [
             {
