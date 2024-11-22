@@ -2,15 +2,15 @@ import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from multiprocessing import cpu_count
-from safetensors.torch import load_model
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
+from safetensors.torch import load_model
 from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from .data import chunk_and_tokenize, MemmapDataset
+from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
 
 
@@ -61,7 +61,9 @@ class RunConfig(TrainConfig):
     """Number of processes to use for preprocessing data"""
 
 
-def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+def load_artifacts(
+    args: RunConfig, rank: int
+) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -156,7 +158,11 @@ def run():
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:
             for name, sae in trainer.saes.items():
-                load_model(sae, f"{args.finetune}/{name}/sae.safetensors", device=str(model.device))
+                load_model(
+                    sae,
+                    f"{args.finetune}/{name}/sae.safetensors",
+                    device=str(model.device),
+                )
 
         trainer.fit()
 

@@ -124,12 +124,13 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
 
 class MemmapDataset(TorchDataset):
     """Torch Dataset backed by a memory-mapped numpy array."""
+
     def __init__(
         self,
         data_path: str,
         ctx_len: int,
         max_examples: int | None = None,
-        dtype = np.uint16,
+        dtype=np.uint16,
     ):
         mmap = np.memmap(data_path, dtype=dtype, mode="r").reshape(-1, ctx_len)
         self.mmap = mmap[:max_examples]
@@ -138,14 +139,12 @@ class MemmapDataset(TorchDataset):
         return len(self.mmap)
 
     def __getitem__(self, idx):
-        return dict(
-            input_ids=torch.from_numpy(self.mmap[idx].astype(np.int64))
-        )
-    
+        return dict(input_ids=torch.from_numpy(self.mmap[idx].astype(np.int64)))
+
     def select(self, rng: range) -> "MemmapDataset":
         """Select a subset of the dataset."""
         mmap = MemmapDataset.__new__(MemmapDataset)
-        mmap.mmap = self.mmap[rng.start:rng.stop]
+        mmap.mmap = self.mmap[rng.start : rng.stop]
         return mmap
 
     def shard(self, num_shards: int, shard_id: int) -> "MemmapDataset":
