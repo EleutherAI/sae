@@ -1,5 +1,6 @@
 import os
 from typing import Any, Type, TypeVar, cast
+from math import prod
 
 import torch
 from accelerate.utils import send_to_device
@@ -61,7 +62,8 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 
 @torch.inference_mode()
 def resolve_widths(
-    model: PreTrainedModel, module_names: list[str], dim: int = -1,
+    model: PreTrainedModel, module_names: list[str], dummy_inputs: dict[str, Tensor], 
+    dims: tuple[int] = (-1,),
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
     module_to_name = {
@@ -75,12 +77,13 @@ def resolve_widths(
             output, *_ = output
 
         name = module_to_name[module]
-        shapes[name] = output.shape[dim]
+
+        shapes[name] = prod(output.shape[d] for d in dims)
 
     handles = [
         mod.register_forward_hook(hook) for mod in module_to_name
     ]
-    dummy = send_to_device(model.dummy_inputs, model.device)
+    dummy = send_to_device(dummy_inputs, model.device)
     try:
         model(**dummy)
     finally:

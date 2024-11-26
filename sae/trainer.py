@@ -22,7 +22,7 @@ from .utils import geometric_median, get_layer_list, resolve_widths
 
 class SaeTrainer:
     def __init__(
-        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel
+        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel, dummy_inputs: dict[str, Tensor] | None = None
     ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
@@ -32,9 +32,17 @@ class SaeTrainer:
             for name, _ in model.named_modules():
                 if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
                     raw_hookpoints.append(name)
-
             # Natural sort to impose a consistent order
-            cfg.hookpoints = natsorted(raw_hookpoints)
+            found_hookpoints = natsorted(raw_hookpoints)
+
+            if not found_hookpoints:
+                print(f"No modules matched the pattern(s) {cfg.hookpoints}")
+                print("Available modules:")
+                for name, _ in model.named_modules():
+                    print(name)
+
+            cfg.hookpoints = found_hookpoints
+
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -54,7 +62,9 @@ class SaeTrainer:
         num_examples = len(dataset)
 
         device = model.device
-        input_widths = resolve_widths(model, cfg.hookpoints)
+        dummy_inputs = dummy_inputs if dummy_inputs is not None else model.dummy_inputs
+        input_widths = resolve_widths(model, cfg.hookpoints, dummy_inputs, 
+                                      dims=cfg.feature_dims)
         unique_widths = set(input_widths.values())
 
         if cfg.distribute_modules and len(unique_widths) > 1:
@@ -205,11 +215,11 @@ class SaeTrainer:
                 outputs = outputs[0]
 
             name = module_to_name[module]
-            output_dict[name] = outputs.flatten(0, 1)
+            output_dict[name] = outputs
 
             # Remember the inputs if we're training a transcoder
             if self.cfg.transcode:
-                input_dict[name] = inputs.flatten(0, 1)
+                input_dict[name] = inputs
 
         for batch in dl:
             input_dict.clear()
@@ -237,6 +247,13 @@ class SaeTrainer:
                 # 'inputs' is distinct from outputs iff we're transcoding
                 inputs = input_dict.get(name, outputs)
                 raw = self.saes[name]           # 'raw' never has a DDP wrapper
+
+                outputs = outputs.permute(*self.cfg.instance_dims, *self.cfg.feature_dims)
+                outputs = outputs.reshape(-1, raw.d_in)
+
+                if self.cfg.transcode:
+                    inputs = inputs.permute(*self.cfg.instance_dims, *self.cfg.feature_dims)
+                    inputs = inputs.reshape(-1, raw.d_in)
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:

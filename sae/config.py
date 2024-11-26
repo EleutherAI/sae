@@ -67,9 +67,14 @@ class TrainConfig(Serializable):
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 
+    instance_dims: tuple = (0, 1)
+
+    feature_dims: tuple = (2,)
+    
     log_to_wandb: bool = True
     run_name: str | None = None
     wandb_log_frequency: int = 1
+    
 
     def __post_init__(self):
         assert not (
