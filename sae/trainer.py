@@ -248,12 +248,8 @@ class SaeTrainer:
                 inputs = input_dict.get(name, outputs)
                 raw = self.saes[name]           # 'raw' never has a DDP wrapper
 
-                outputs = outputs.permute(*self.cfg.sample_dims, *self.cfg.feature_dims)
                 outputs = outputs.reshape(-1, raw.d_in)
-
-                if self.cfg.transcode:
-                    inputs = inputs.permute(*self.cfg.sample_dims, *self.cfg.feature_dims)
-                    inputs = inputs.reshape(-1, raw.d_in)
+                inputs = inputs.reshape(-1, raw.d_in)
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:

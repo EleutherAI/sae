@@ -63,7 +63,7 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 @torch.inference_mode()
 def resolve_widths(
     model: PreTrainedModel, module_names: list[str], dummy_inputs: dict[str, Tensor], 
-    dims: set[int] = {-1},
+    dims: list[int] = [-1],
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
     module_to_name = {
@@ -77,6 +77,10 @@ def resolve_widths(
             output, *_ = output
 
         name = module_to_name[module]
+
+        pos_dims = [d if d >= 0 else output.ndim + d for d in dims]
+        assert all(i in pos_dims for i in range(min(pos_dims), max(pos_dims) + 1)) and max(pos_dims) == output.ndim - 1, \
+            f"Feature dimensions {dims} must be contiguous and include the final dimension"
 
         shapes[name] = prod(output.shape[d] for d in dims)
 
