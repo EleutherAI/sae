@@ -63,7 +63,7 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 @torch.inference_mode()
 def resolve_widths(
     model: PreTrainedModel, module_names: list[str], dummy_inputs: dict[str, Tensor], 
-    dims: tuple[int] = (-1,),
+    dims: set[int] = {-1},
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
     module_to_name = {
