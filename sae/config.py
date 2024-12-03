@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import AbstractSet
 
 from simple_parsing import Serializable, list_field
 
@@ -68,12 +67,6 @@ class TrainConfig(Serializable):
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
 
-    sample_dims: AbstractSet[int] = frozenset({0, 1})
-    """Dimensions containing SAE inputs."""
-
-    feature_dims: AbstractSet[int] = frozenset({2})
-    """Dimensions of SAE inputs."""
-    
     log_to_wandb: bool = True
     run_name: str | None = None
     wandb_log_frequency: int = 1

@@ -36,10 +36,11 @@ class SaeTrainer:
             found_hookpoints = natsorted(raw_hookpoints)
 
             if not found_hookpoints:
-                print(f"No modules matched the pattern(s) {cfg.hookpoints}")
-                print("Available modules:")
-                for name, _ in model.named_modules():
-                    print(name)
+                error_msg = f"""No modules matched the pattern(s) {cfg.hookpoints}
+
+Available modules:
+{chr(10).join(name for name, _ in model.named_modules())}"""
+                raise ValueError(error_msg)
 
             cfg.hookpoints = found_hookpoints
 
@@ -63,8 +64,7 @@ class SaeTrainer:
 
         device = model.device
         dummy_inputs = dummy_inputs if dummy_inputs is not None else model.dummy_inputs
-        input_widths = resolve_widths(model, cfg.hookpoints, dummy_inputs, 
-                                      dims=cfg.feature_dims)
+        input_widths = resolve_widths(model, cfg.hookpoints, dummy_inputs)
         unique_widths = set(input_widths.values())
 
         if cfg.distribute_modules and len(unique_widths) > 1:
@@ -215,11 +215,11 @@ class SaeTrainer:
                 outputs = outputs[0]
 
             name = module_to_name[module]
-            output_dict[name] = outputs
+            output_dict[name] = outputs.flatten(0, -2)
 
             # Remember the inputs if we're training a transcoder
             if self.cfg.transcode:
-                input_dict[name] = inputs
+                input_dict[name] = inputs.flatten(0, -2)
 
         for batch in dl:
             input_dict.clear()
@@ -247,13 +247,6 @@ class SaeTrainer:
                 # 'inputs' is distinct from outputs iff we're transcoding
                 inputs = input_dict.get(name, outputs)
                 raw = self.saes[name]           # 'raw' never has a DDP wrapper
-
-                outputs = outputs.permute(*self.cfg.sample_dims, *self.cfg.feature_dims)
-                outputs = outputs.reshape(-1, raw.d_in)
-
-                if self.cfg.transcode:
-                    inputs = inputs.permute(*self.cfg.sample_dims, *self.cfg.feature_dims)
-                    inputs = inputs.reshape(-1, raw.d_in)
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:
