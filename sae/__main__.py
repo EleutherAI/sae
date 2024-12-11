@@ -5,10 +5,11 @@ from multiprocessing import cpu_count
 from safetensors.torch import load_model
 
 import torch
+from torch import Tensor
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+from transformers import AutoModel, BitsAndBytesConfig, PreTrainedModel, AutoProcessor, BaseImageProcessor, PreTrainedTokenizerBase
 
 from .data import chunk_and_tokenize, MemmapDataset
 from .trainer import SaeTrainer, TrainConfig
@@ -61,7 +62,7 @@ class RunConfig(TrainConfig):
     """Number of processes to use for preprocessing data"""
 
 
-def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset, dict[str, Tensor] | None]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -102,25 +103,34 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
                 raise e
 
         assert isinstance(dataset, Dataset)
-        if "input_ids" not in dataset.column_names:
-            tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
-            dataset = chunk_and_tokenize(
-                dataset,
-                tokenizer,
-                max_seq_len=args.ctx_len,
-                num_proc=args.data_preprocessing_num_proc,
-            )
+        processor = AutoProcessor.from_pretrained(args.model, token=args.hf_token)
+        target_column = "pixel_values" if isinstance(processor, BaseImageProcessor) else "input_ids"
+
+        if target_column not in dataset.column_names:
+            if isinstance(processor, BaseImageProcessor):
+                image_key = "img" if "img" in dataset.column_names else "image"    
+                dataset = dataset.map(lambda x: processor(x[image_key], return_tensors="pt"), batched=True)
+            elif isinstance(processor, PreTrainedTokenizerBase):
+                dataset = chunk_and_tokenize(
+                    dataset,
+                    processor,
+                    max_seq_len=args.ctx_len,
+                    num_proc=args.data_preprocessing_num_proc,
+                )
         else:
             print("Dataset already tokenized; skipping tokenization.")
 
         print(f"Shuffling dataset with seed {args.seed}")
         dataset = dataset.shuffle(args.seed)
 
-        dataset = dataset.with_format("torch")
+        dataset = dataset.with_format("torch", dtype=dtype if target_column == "pixel_values" else None)
+
         if limit := args.max_examples:
             dataset = dataset.select(range(limit))
 
-    return model, dataset
+        dummy_inputs = {target_column: dataset[0][target_column].unsqueeze(0)} 
+
+    return model, dataset, dummy_inputs
 
 
 def run():
@@ -139,11 +149,11 @@ def run():
 
     # Awkward hack to prevent other ranks from duplicating data preprocessing
     if not ddp or rank == 0:
-        model, dataset = load_artifacts(args, rank)
+        model, dataset, dummy_inputs = load_artifacts(args, rank)
     if ddp:
         dist.barrier()
         if rank != 0:
-            model, dataset = load_artifacts(args, rank)
+            model, dataset, dummy_inputs = load_artifacts(args, rank)
         dataset = dataset.shard(dist.get_world_size(), rank)
 
     # Prevent ranks other than 0 from printing
@@ -151,7 +161,7 @@ def run():
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = SaeTrainer(args, dataset, model)
+        trainer = SaeTrainer(args, dataset, model, dummy_inputs)
         if args.resume:
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:

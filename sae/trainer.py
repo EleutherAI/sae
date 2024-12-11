@@ -64,6 +64,7 @@ Available modules:
 
         device = model.device
         dummy_inputs = dummy_inputs if dummy_inputs is not None else model.dummy_inputs
+        self.key = list(dummy_inputs.keys())[0]
         input_widths = resolve_widths(model, cfg.hookpoints, dummy_inputs)
         unique_widths = set(input_widths.values())
 
@@ -226,7 +227,7 @@ Available modules:
             output_dict.clear()
 
             # Bookkeeping for dead feature detection
-            num_tokens_in_step += batch["input_ids"].numel()
+            num_tokens_in_step += batch[self.key].numel()
 
             # Forward pass on the model to get the next batch of activations            
             handles = [
@@ -234,7 +235,8 @@ Available modules:
             ]
             try:
                 with torch.no_grad():
-                    self.model(batch["input_ids"].to(device))
+                    self.model(batch[self.key].to(device))
+                    
             finally:
                 for handle in handles:
                     handle.remove()
