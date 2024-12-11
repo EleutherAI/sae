@@ -22,7 +22,7 @@ from .utils import geometric_median, get_layer_list, resolve_widths
 
 class SaeTrainer:
     def __init__(
-        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel
+        self, cfg: TrainConfig, dataset: HfDataset | MemmapDataset, model: PreTrainedModel, dummy_inputs: dict[str, Tensor] | None = None
     ):
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
@@ -32,9 +32,18 @@ class SaeTrainer:
             for name, _ in model.named_modules():
                 if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
                     raw_hookpoints.append(name)
-
             # Natural sort to impose a consistent order
-            cfg.hookpoints = natsorted(raw_hookpoints)
+            found_hookpoints = natsorted(raw_hookpoints)
+
+            if not found_hookpoints:
+                error_msg = f"""No modules matched the pattern(s) {cfg.hookpoints}
+
+Available modules:
+{chr(10).join(name for name, _ in model.named_modules())}"""
+                raise ValueError(error_msg)
+
+            cfg.hookpoints = found_hookpoints
+
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -54,7 +63,9 @@ class SaeTrainer:
         num_examples = len(dataset)
 
         device = model.device
-        input_widths = resolve_widths(model, cfg.hookpoints)
+        dummy_inputs = dummy_inputs if dummy_inputs is not None else model.dummy_inputs
+        self.key = list(dummy_inputs.keys())[0]
+        input_widths = resolve_widths(model, cfg.hookpoints, dummy_inputs)
         unique_widths = set(input_widths.values())
 
         if cfg.distribute_modules and len(unique_widths) > 1:
@@ -205,18 +216,18 @@ class SaeTrainer:
                 outputs = outputs[0]
 
             name = module_to_name[module]
-            output_dict[name] = outputs.flatten(0, 1)
+            output_dict[name] = outputs.flatten(0, -2)
 
             # Remember the inputs if we're training a transcoder
             if self.cfg.transcode:
-                input_dict[name] = inputs.flatten(0, 1)
+                input_dict[name] = inputs.flatten(0, -2)
 
         for batch in dl:
             input_dict.clear()
             output_dict.clear()
 
             # Bookkeeping for dead feature detection
-            num_tokens_in_step += batch["input_ids"].numel()
+            num_tokens_in_step += batch[self.key].numel()
 
             # Forward pass on the model to get the next batch of activations            
             handles = [
@@ -224,7 +235,8 @@ class SaeTrainer:
             ]
             try:
                 with torch.no_grad():
-                    self.model(batch["input_ids"].to(device))
+                    self.model(batch[self.key].to(device))
+                    
             finally:
                 for handle in handles:
                     handle.remove()
