@@ -68,10 +68,20 @@ class SaeTrainer:
             )
 
         self.model = model
-        self.saes = {
-            hook: Sae(input_widths[hook], cfg.sae, device)
-            for hook in self.local_hookpoints()
-        }
+
+        # Initialize all the SAEs
+        print(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
+        self.saes = {}
+        for hook in self.local_hookpoints():
+            for seed in cfg.init_seeds:
+                torch.manual_seed(seed)
+
+                # Add suffix to the name to disambiguate multiple seeds
+                name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
+                self.saes[name] = Sae(
+                    input_widths[hook], cfg.sae, device, dtype=torch.float32
+                )
+
         # Re-initialize the decoder for transcoder training. By default the Sae class
         # initializes the decoder with the transpose of the encoder.
         if cfg.transcode:
@@ -246,10 +256,14 @@ class SaeTrainer:
                 input_dict = self.scatter_hiddens(input_dict)
                 output_dict = self.scatter_hiddens(output_dict)
 
-            for name, outputs in output_dict.items():
+            for name, raw in self.saes.items():
+                # Name may optionally contain a suffix of the form /seedN where N is an
+                # integer. We only care about the part before the slash.
+                hookpoint, _, _ = name.partition("/")
+
                 # 'inputs' is distinct from outputs iff we're transcoding
+                outputs = output_dict[hookpoint]
                 inputs = input_dict.get(name, outputs)
-                raw = self.saes[name]  # 'raw' never has a DDP wrapper
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:
@@ -477,10 +491,10 @@ class SaeTrainer:
         if rank_zero or self.cfg.distribute_modules:
             print("Saving checkpoint")
 
-            for hook, sae in self.saes.items():
+            for name, sae in self.saes.items():
                 assert isinstance(sae, Sae)
 
-                sae.save_to_disk(f"{path}/{hook}")
+                sae.save_to_disk(f"{path}/{name}")
 
         if rank_zero:
             torch.save(self.lr_scheduler.state_dict(), f"{path}/lr_scheduler.pt")

@@ -55,6 +55,10 @@ class TrainConfig(Serializable):
     hookpoints: list[str] = list_field()
     """List of hookpoints to train SAEs on."""
 
+    init_seeds: list[int] = list_field(0)
+    """List of random seeds to use for initialization. If more than one, train an SAE
+    for each seed."""
+
     layers: list[int] = list_field()
     """List of layer indices to train SAEs on."""
 
@@ -78,3 +82,5 @@ class TrainConfig(Serializable):
         assert not (
             self.layers and self.layer_stride != 1
         ), "Cannot specify both `layers` and `layer_stride`."
+
+        assert len(self.init_seeds) > 0, "Must specify at least one random seed."
