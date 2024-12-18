@@ -1,6 +1,7 @@
 import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
+from datetime import timedelta
 from multiprocessing import cpu_count
 
 import torch
@@ -48,6 +49,9 @@ class RunConfig(TrainConfig):
 
     resume: bool = False
     """Whether to try resuming from the checkpoint present at `run_name`."""
+
+    text_column: str = "text"
+    """Column name to use for text data."""
 
     finetune: str | None = None
     """Path to pretrained SAEs to finetune."""
@@ -111,6 +115,7 @@ def load_artifacts(
                 tokenizer,
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc,
+                text_key=args.text_column,
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")
@@ -132,7 +137,10 @@ def run():
 
     if ddp:
         torch.cuda.set_device(int(local_rank))
-        dist.init_process_group("nccl")
+
+        # Increase the default timeout in order to account for slow downloads
+        # and data preprocessing on the main rank
+        dist.init_process_group("nccl", timeout=timedelta(weeks=1))
 
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")

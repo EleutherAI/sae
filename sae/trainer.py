@@ -17,7 +17,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 from .config import TrainConfig
 from .data import MemmapDataset
 from .sae import Sae
-from .utils import geometric_median, get_layer_list, resolve_widths
+from .utils import get_layer_list, resolve_widths
 
 
 class SaeTrainer:
@@ -253,22 +253,8 @@ class SaeTrainer:
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:
-                    # Initialize the linear skip connection using OLS
-                    if raw.W_skip is not None:
-                        from .analytic import linear_approx
-
-                        mean = self.maybe_all_reduce(inputs.float().mean(0))
-                        cov = self.maybe_all_reduce(inputs.mT.float().cov())
-
-                        mod = self.model.get_submodule(name)
-                        res = linear_approx(mod, mean, cov=cov)
-                        assert res is not None
-
-                        raw.b_dec.data = res.alpha.type_as(raw.b_dec)
-                        raw.W_skip.data = res.beta.type_as(raw.b_dec).T
-                    else:
-                        mean = self.maybe_all_reduce(outputs.mean(0))
-                        raw.b_dec.data = mean.to(raw.dtype)
+                    mean = self.maybe_all_reduce(outputs.mean(0))
+                    raw.b_dec.data = mean.to(raw.dtype)
 
                 if not maybe_wrapped:
                     # Wrap the SAEs with Distributed Data Parallel. We have to do this
