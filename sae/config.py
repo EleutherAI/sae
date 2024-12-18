@@ -24,6 +24,9 @@ class SaeConfig(Serializable):
     multi_topk: bool = False
     """Use Multi-TopK loss."""
 
+    skip_connection: bool = False
+    """Include a linear skip connection."""
+
 
 @dataclass
 class TrainConfig(Serializable):

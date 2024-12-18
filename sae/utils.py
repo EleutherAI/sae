@@ -17,35 +17,6 @@ def assert_type(typ: Type[T], obj: Any) -> T:
     return cast(typ, obj)
 
 
-@torch.no_grad()
-def geometric_median(points: Tensor, max_iter: int = 100, tol: float = 1e-5):
-    """Compute the geometric median `points`. Used for initializing decoder bias."""
-    # Initialize our guess as the mean of the points
-    guess = points.mean(dim=0)
-    prev = torch.zeros_like(guess)
-
-    # Weights for iteratively reweighted least squares
-    weights = torch.ones(len(points), device=points.device)
-
-    for _ in range(max_iter):
-        prev = guess
-
-        # Compute the weights
-        weights = 1 / torch.norm(points - guess, dim=1)
-
-        # Normalize the weights
-        weights /= weights.sum()
-
-        # Compute the new geometric median
-        guess = (weights.unsqueeze(1) * points).sum(dim=0)
-
-        # Early stopping condition
-        if torch.norm(guess - prev) < tol:
-            break
-
-    return guess
-
-
 def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
     """Get the list of layers to train SAEs on."""
     N = assert_type(int, model.config.num_hidden_layers)
@@ -61,12 +32,12 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
 
 @torch.inference_mode()
 def resolve_widths(
-    model: PreTrainedModel, module_names: list[str], dim: int = -1,
+    model: PreTrainedModel,
+    module_names: list[str],
+    dim: int = -1,
 ) -> dict[str, int]:
     """Find number of output dimensions for the specified modules."""
-    module_to_name = {
-        model.get_submodule(name): name for name in module_names
-    }
+    module_to_name = {model.get_submodule(name): name for name in module_names}
     shapes: dict[str, int] = {}
 
     def hook(module, _, output):
@@ -77,16 +48,14 @@ def resolve_widths(
         name = module_to_name[module]
         shapes[name] = output.shape[dim]
 
-    handles = [
-        mod.register_forward_hook(hook) for mod in module_to_name
-    ]
+    handles = [mod.register_forward_hook(hook) for mod in module_to_name]
     dummy = send_to_device(model.dummy_inputs, model.device)
     try:
         model(**dummy)
     finally:
         for handle in handles:
             handle.remove()
-    
+
     return shapes
 
 

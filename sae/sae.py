@@ -65,6 +65,10 @@ class Sae(nn.Module):
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
+        self.W_skip = nn.Parameter(
+            torch.zeros(d_in, d_in, device=device, dtype=dtype)
+        ) if cfg.skip_connection else None
+
     @staticmethod
     def load_many(
         name: str,
@@ -84,7 +88,9 @@ class Sae(nn.Module):
 
         if layers is not None:
             return {
-                layer: Sae.load_from_disk(repo_path / layer, device=device, decoder=decoder)
+                layer: Sae.load_from_disk(
+                    repo_path / layer, device=device, decoder=decoder
+                )
                 for layer in natsorted(layers)
             }
         files = [
@@ -197,9 +203,13 @@ class Sae(nn.Module):
         if y is None:
             y = x
 
-        # Decode and compute residual
+        # Decode
         top_acts, top_indices = self.select_topk(pre_acts)
         sae_out = self.decode(top_acts, top_indices)
+        if self.W_skip is not None:
+            sae_out += x.to(self.dtype) @ self.W_skip.mT
+
+        # Compute the residual
         e = sae_out - y
 
         # Used as a denominator for putting everything on a reasonable scale

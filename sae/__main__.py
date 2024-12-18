@@ -1,16 +1,17 @@
 import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
+from datetime import timedelta
 from multiprocessing import cpu_count
-from safetensors.torch import load_model
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
+from safetensors.torch import load_model
 from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
-from .data import chunk_and_tokenize, MemmapDataset
+from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
 
 
@@ -49,6 +50,9 @@ class RunConfig(TrainConfig):
     resume: bool = False
     """Whether to try resuming from the checkpoint present at `run_name`."""
 
+    text_column: str = "text"
+    """Column name to use for text data."""
+
     finetune: str | None = None
     """Path to pretrained SAEs to finetune."""
 
@@ -61,7 +65,9 @@ class RunConfig(TrainConfig):
     """Number of processes to use for preprocessing data"""
 
 
-def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+def load_artifacts(
+    args: RunConfig, rank: int
+) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     if args.load_in_8bit:
         dtype = torch.float16
     elif torch.cuda.is_bf16_supported():
@@ -109,6 +115,7 @@ def load_artifacts(args: RunConfig, rank: int) -> tuple[PreTrainedModel, Dataset
                 tokenizer,
                 max_seq_len=args.ctx_len,
                 num_proc=args.data_preprocessing_num_proc,
+                text_key=args.text_column,
             )
         else:
             print("Dataset already tokenized; skipping tokenization.")
@@ -130,7 +137,10 @@ def run():
 
     if ddp:
         torch.cuda.set_device(int(local_rank))
-        dist.init_process_group("nccl")
+
+        # Increase the default timeout in order to account for slow downloads
+        # and data preprocessing on the main rank
+        dist.init_process_group("nccl", timeout=timedelta(weeks=1))
 
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
@@ -156,7 +166,11 @@ def run():
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:
             for name, sae in trainer.saes.items():
-                load_model(sae, f"{args.finetune}/{name}/sae.safetensors", device=str(model.device))
+                load_model(
+                    sae,
+                    f"{args.finetune}/{name}/sae.safetensors",
+                    device=str(model.device),
+                )
 
         trainer.fit()
 
