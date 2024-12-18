@@ -56,7 +56,7 @@ class RunConfig(TrainConfig):
     finetune: str | None = None
     """Path to pretrained SAEs to finetune."""
 
-    seed: int = 42
+    shuffle_seed: int = 42
     """Random seed for shuffling the dataset."""
 
     data_preprocessing_num_proc: int = field(
@@ -120,8 +120,8 @@ def load_artifacts(
         else:
             print("Dataset already tokenized; skipping tokenization.")
 
-        print(f"Shuffling dataset with seed {args.seed}")
-        dataset = dataset.shuffle(args.seed)
+        print(f"Shuffling dataset with seed {args.shuffle_seed}")
+        dataset = dataset.shuffle(args.shuffle_seed)
 
         dataset = dataset.with_format("torch")
         if limit := args.max_examples:

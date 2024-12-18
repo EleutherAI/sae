@@ -82,3 +82,5 @@ class TrainConfig(Serializable):
         assert not (
             self.layers and self.layer_stride != 1
         ), "Cannot specify both `layers` and `layer_stride`."
+
+        assert len(self.init_seeds) > 0, "Must specify at least one random seed."
