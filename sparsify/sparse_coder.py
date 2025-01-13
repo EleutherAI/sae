@@ -183,6 +183,7 @@ class SparseCoder(nn.Module):
     def dtype(self):
         return self.encoder.weight.dtype
 
+    @torch.compile
     def pre_acts(self, x: Tensor) -> Tensor:
         sae_in = x.to(self.dtype)
 

@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+from transformers import PreTrainedModel, get_linear_schedule_with_warmup, get_constant_schedule
 
 from .config import TrainConfig
 from .data import MemmapDataset
@@ -87,7 +87,7 @@ class Trainer:
             {
                 "params": sae.parameters(),
                 # Auto-select LR using 1 / sqrt(d) scaling law from Fig 3 of the paper
-                "lr": cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
+                "lr": cfg.lr or 10 * 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
             }
             for sae in self.saes.values()
         ]
@@ -110,9 +110,16 @@ class Trainer:
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
             for name, sae in self.saes.items()
         }
-        self.optimizer = Adam(pgs)
+        from .muon import Muon
+
+        lrs = sorted(set(pg["lr"] for pg in pgs))
+        self.optimizer = Muon(
+            [p for sae in self.saes.values() for p in sae.parameters()],
+            lr=0.1, momentum=0.0, adamw_lr=lrs[0]
+        )
+        # self.lr_scheduler = get_constant_schedule(self.optimizer)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+            self.optimizer, 0, num_examples // cfg.batch_size
         )
 
     def load_state(self, path: str):
@@ -206,6 +213,10 @@ class Trainer:
 
         did_fire = {
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
+            for name, sae in self.saes.items()
+        }
+        fire_counts = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
             for name, sae in self.saes.items()
         }
         num_tokens_in_step = 0
@@ -329,12 +340,15 @@ class Trainer:
                     )
                     loss.div(acc_steps).backward()
 
+                    counts = fire_counts[name]
+                    counts += torch.bincount(
+                        out.latent_indices.flatten(), minlength=len(counts)
+                    )
+                    self.maybe_all_reduce(counts, "sum")
+
                     # Update the did_fire mask
                     did_fire[name][out.latent_indices.flatten()] = True
                     self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
-
-                # Clip gradient norm independently for each sparse coder
-                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
@@ -370,6 +384,9 @@ class Trainer:
                             self.num_tokens_since_fired[name]
                             > self.cfg.dead_feature_threshold
                         )
+                        denom = fire_counts[name].sum(dtype=torch.float32)
+                        probs = fire_counts[name] / denom
+                        entropy = -torch.sum(probs * probs.add(1e-10).log2()).item()
 
                         info.update(
                             {
@@ -377,8 +394,11 @@ class Trainer:
                                 f"dead_pct/{name}": mask.mean(
                                     dtype=torch.float32
                                 ).item(),
+                                f"entropy/{name}": entropy,
+                                # f"gini/{name}": gini_coefficient(fire_counts[name]).item(),
                             }
                         )
+                        fire_counts[name].zero_()
                         if self.cfg.auxk_alpha > 0:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
