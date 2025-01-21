@@ -21,6 +21,7 @@ sae_pkm = Sae(
 #%%
 fake_data = torch.randn(16384, d_in, device=device, dtype=dtype)
 #%%
+import torch.utils.benchmark
 from tqdm.auto import tqdm, trange
 torch.set_float32_matmul_precision("high")
 @torch.compile
@@ -37,18 +38,15 @@ pkm_forward(sae_pkm.encoder, fake_data)
 pkm_forward_topk(sae_pkm.encoder, fake_data)
 
 def benchmark(fn):
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(100):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    print(start.elapsed_time(end)/100)
+    fn()
+    print(torch.utils.benchmark.Timer(
+        stmt="fn()",
+        globals={"fn": fn},
+        setup="fn()",
+    ).blocked_autorange())
 
 with torch.inference_mode():
-    pkm_forward_topk(sae_pkm.encoder, fake_data)
     benchmark(lambda: regular_forward(sae_regular.encoder, fake_data))
-    benchmark(lambda: pkm_forward(sae_pkm.encoder, fake_data))
+    # benchmark(lambda: pkm_forward(sae_pkm.encoder, fake_data))
     benchmark(lambda: pkm_forward_topk(sae_pkm.encoder, fake_data))
 #%%

@@ -68,12 +68,13 @@ class PKMLinear(nn.Module):
         # x = x * torch.exp(self._scale)
         orig_batch_size = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
-        # x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
-        x1, x2 = torch.chunk(x[..., :self.pkm_base * 2], 2, dim=-1)
+        x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
+        # x1, x2 = torch.chunk(x[..., :self.pkm_base * 2], 2, dim=-1)
         k1, k2 = k, k
         w1, i1 = x1.topk(k1, dim=1)
         w2, i2 = x2.topk(k2, dim=1)
-        w, i_ = (w1[:, :, None] + w2[:, None, :]).view(-1, k1 * k2).topk(k, dim=-1)
+        w = (w1[:, :, None] + w2[:, None, :]).view(-1, k1 * k2)
+        w, i_ = w.topk(k, dim=-1)
         i1 = torch.gather(i1, 1, i_ // k2)
         i2 = torch.gather(i2, 1, i_ % k2)
         i = i1 * self.pkm_base + i2
