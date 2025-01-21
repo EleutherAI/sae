@@ -1,7 +1,9 @@
+# PYTHONPATH=hamm/src/python CUDA_VISIBLE_DEVICES=5 python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
 import json
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
+import math
 
 import einops
 import torch
@@ -41,6 +43,54 @@ class ForwardOutput(NamedTuple):
     """Multi-TopK FVU, if applicable."""
 
 
+class PKMLinear(nn.Module):
+    def __init__(self, d_in: int, num_latents: int, device: str | torch.device, dtype: torch.dtype | None = None):
+        super().__init__()
+        self.d_in = d_in
+        self.num_latents = num_latents
+        # self.pkm_base = int(math.ceil(math.sqrt(num_latents)))
+        self.pkm_base = int(2 ** math.ceil(math.log2(num_latents) / 2))
+        self._weight = nn.Linear(d_in, 2 * self.pkm_base, device=device, dtype=dtype)
+        self._weight.weight.data /= 4
+        # Orthogonal matrices have the same FVU  as /4, but produce more dead latents
+        # torch.nn.init.orthogonal_(self._weight.weight, gain=0.5 / math.sqrt(self.d_in))
+        self._scale = nn.Parameter(torch.zeros(1, dtype=dtype, device=device))
+        
+    def forward(self, x):
+        x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
+        y = (x1[..., :, None] + x2[..., None, :]).reshape(
+            *x.shape[:-1], self.pkm_base**2
+        )[..., : self.num_latents]
+        return y
+
+    @torch.compile(mode="max-autotune")
+    def topk(self, x, k: int):
+        # x = x * torch.exp(self._scale)
+        orig_batch_size = x.shape[:-1]
+        x = x.view(-1, x.shape[-1])
+        # x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
+        x1, x2 = torch.chunk(x[..., :self.pkm_base * 2], 2, dim=-1)
+        k1, k2 = k, k
+        w1, i1 = x1.topk(k1, dim=1)
+        w2, i2 = x2.topk(k2, dim=1)
+        w, i_ = (w1[:, :, None] + w2[:, None, :]).view(-1, k1 * k2).topk(k, dim=-1)
+        i1 = torch.gather(i1, 1, i_ // k2)
+        i2 = torch.gather(i2, 1, i_ % k2)
+        i = i1 * self.pkm_base + i2
+        return w.view(*orig_batch_size, k), i.reshape(*orig_batch_size, k)
+
+    @property
+    def weight(self):
+        w1, w2 = torch.chunk(self._weight.weight, 2, dim=0)
+        pkm_trim = math.ceil(self.num_latents / self.pkm_base)
+        w1 = w1[:pkm_trim]
+        w1 = w1[:, None, :]
+        w2 = w2[None, :, :]
+        w1 = w1.expand(-1, w2.shape[1], -1)
+        w2 = w2.expand(w1.shape[0], -1, -1)
+        return (w1 + w2).reshape(self.pkm_base * pkm_trim, self.d_in)[:self.num_latents] * torch.exp(self._scale)
+
+
 class Sae(nn.Module):
     def __init__(
         self,
@@ -56,10 +106,24 @@ class Sae(nn.Module):
         self.d_in = d_in
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
-        self.encoder.bias.data.zero_()
+        self.device = device
+        self.dtype = dtype
+        if cfg.encoder_halut:
+            from halutmatmul.modules import HalutLinear
+            self.encoder = HalutLinear(d_in, self.num_latents, device=device, dtype=dtype)
+            self.encoder.halut_active[:] = 1
+            # TODO properly set parameters. We should have the data at this point
+            # Reference:
+            # https://github.com/joennlae/halutmatmul/blob/master/src/python/halutmatmul/model.py#L92
+            self.encoder.bias.data.zero_()
+        elif cfg.encoder_pkm:
+            self.encoder = PKMLinear(d_in, self.num_latents, device=device, dtype=dtype)
+            self.encoder._weight.bias.data.zero_()
+        else:
+            self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+            self.encoder.bias.data.zero_()
 
-        self.W_dec = nn.Parameter(self.encoder.weight.data.clone()) if decoder else None
+        self.W_dec = nn.Parameter(self.encoder.weight.clone()) if decoder else None
         if decoder and self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
@@ -165,14 +229,6 @@ class Sae(nn.Module):
                 f,
             )
 
-    @property
-    def device(self):
-        return self.encoder.weight.device
-
-    @property
-    def dtype(self):
-        return self.encoder.weight.dtype
-
     def pre_acts(self, x: Tensor) -> Tensor:
         # Remove decoder bias as per Anthropic
         sae_in = x.to(self.dtype) - self.b_dec
@@ -186,6 +242,8 @@ class Sae(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
+        if self.cfg.encoder_pkm:
+            return self.encoder.topk(x, self.cfg.k)
         return self.select_topk(self.pre_acts(x))
 
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:

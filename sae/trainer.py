@@ -343,6 +343,10 @@ class SaeTrainer:
                 self.optimizer.zero_grad()
                 self.lr_scheduler.step()
 
+                if self.cfg.sae.encoder_halut:
+                    for sae in self.saes.values():
+                        sae.encoder.halut_updates()
+
                 ###############
                 with torch.no_grad():
                     # Update the dead feature mask

@@ -9,11 +9,17 @@ class SaeConfig(Serializable):
     Configuration for training a sparse autoencoder on a language model.
     """
 
-    expansion_factor: int = 32
+    expansion_factor: int = 64
     """Multiple of the input dimension to use as the SAE dimension."""
 
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
+    
+    encoder_halut: bool = False
+    """Whether to use hashed lookup tables for the encoder weights."""
+    
+    encoder_pkm: bool = True
+    """Whether to use Product Key Memory for the encoder weights."""
 
     num_latents: int = 0
     """Number of latents to use. If 0, use `expansion_factor`."""
