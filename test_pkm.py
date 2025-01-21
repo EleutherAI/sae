@@ -49,4 +49,3 @@ with torch.inference_mode():
     benchmark(lambda: regular_forward(sae_regular.encoder, fake_data))
     # benchmark(lambda: pkm_forward(sae_pkm.encoder, fake_data))
     benchmark(lambda: pkm_forward_topk(sae_pkm.encoder, fake_data))
-#%%
