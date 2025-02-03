@@ -2,6 +2,7 @@ import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from multiprocessing import cpu_count
 
 import torch
@@ -9,7 +10,9 @@ import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from safetensors.torch import load_model
 from simple_parsing import field, parse
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+from transformers import (
+    AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel,
+)
 
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
@@ -37,6 +40,9 @@ class RunConfig(TrainConfig):
 
     hf_token: str | None = None
     """Huggingface API token for downloading models."""
+
+    random_init: bool = False
+    """Whether to randomly initialize the model."""
 
     revision: str | None = None
     """Model revision to use for training."""
@@ -75,18 +81,25 @@ def load_artifacts(
     else:
         dtype = "auto"
 
-    model = AutoModel.from_pretrained(
-        args.model,
-        device_map={"": f"cuda:{rank}"},
-        quantization_config=(
-            BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
-            if args.load_in_8bit
-            else None
-        ),
-        revision=args.revision,
-        torch_dtype=dtype,
-        token=args.hf_token,
-    )
+    if args.random_init:
+        cfg = AutoConfig.from_pretrained(
+            args.model, revision=args.revision, token=args.hf_token,
+        )
+        model = AutoModel.from_config(cfg, torch_dtype=dtype)
+        model.to(device=f"cuda:{rank}")
+    else:
+        model = AutoModel.from_pretrained(
+            args.model,
+            device_map={"": f"cuda:{rank}"},
+            revision=args.revision,
+            token=args.hf_token,
+            quantization_config=(
+                BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
+                if args.load_in_8bit
+                else None
+            ),
+            torch_dtype=dtype,
+        )
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):

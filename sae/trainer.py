@@ -38,6 +38,8 @@ class SaeTrainer:
 
             # Natural sort to impose a consistent order
             cfg.hookpoints = natsorted(raw_hookpoints)
+            if cfg.layer_stride > 1:
+                cfg.hookpoints = cfg.hookpoints[::cfg.layer_stride]
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -321,7 +323,7 @@ class SaeTrainer:
                     loss = (
                         out.fvu
                         + self.cfg.auxk_alpha * out.auxk_loss
-                        + out.multi_topk_fvu / 8
+                        + out.multi_topk_fvu / 4#8
                     )
                     loss.div(acc_steps).backward()
 
