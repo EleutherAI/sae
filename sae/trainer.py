@@ -2,6 +2,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from typing import Sized
+import math
 
 import torch
 import torch.distributed as dist
@@ -12,7 +13,9 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+from transformers import (
+    PreTrainedModel, get_linear_schedule_with_warmup
+)
 
 from .config import TrainConfig
 from .data import MemmapDataset
@@ -27,17 +30,22 @@ class SaeTrainer:
         dataset: HfDataset | MemmapDataset,
         model: PreTrainedModel,
     ):
+        # Store the whole model, including any potential causal LM wrapper
+        self.model = model
+
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
             # Replace wildcard patterns
             raw_hookpoints = []
-            for name, _ in model.named_modules():
+            for name, _ in model.base_model.named_modules():
                 if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
                     raw_hookpoints.append(name)
 
             # Natural sort to impose a consistent order
             cfg.hookpoints = natsorted(raw_hookpoints)
+            if cfg.layer_stride > 1:
+                cfg.hookpoints = cfg.hookpoints[::cfg.layer_stride]
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -67,8 +75,6 @@ class SaeTrainer:
                 f"`distribute_modules=True`, got {unique_widths}"
             )
 
-        self.model = model
-
         # Initialize all the SAEs
         print(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
         self.saes = {}
@@ -87,7 +93,7 @@ class SaeTrainer:
         if cfg.transcode:
             for sae in self.saes.values():
                 assert sae.W_dec is not None
-                sae.W_dec.data.zero_()
+                nn.init.orthogonal_(sae.W_dec.data)
 
         pgs = [
             {
@@ -152,6 +158,9 @@ class SaeTrainer:
         # Use Tensor Cores even for fp32 matmuls
         torch.set_float32_matmul_precision("high")
 
+        # Make sure the model is frozen
+        self.model.requires_grad_(False)
+
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
 
@@ -204,38 +213,114 @@ class SaeTrainer:
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
             for name, sae in self.saes.items()
         }
+
+        acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
+        denom = acc_steps * self.cfg.wandb_log_frequency
         num_tokens_in_step = 0
 
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
+        aux_loss = 0.0
 
-        input_dict: dict[str, Tensor] = {}
-        output_dict: dict[str, Tensor] = {}
         name_to_module = {
-            name: self.model.get_submodule(name) for name in self.cfg.hookpoints
+            name: self.model.base_model.get_submodule(name)
+            for name in self.cfg.hookpoints
         }
         maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, inputs, outputs):
+            nonlocal aux_loss
+            aux_out = None
+
             # Maybe unpack tuple inputs and outputs
             if isinstance(inputs, tuple):
                 inputs = inputs[0]
             if isinstance(outputs, tuple):
-                outputs = outputs[0]
+                outputs, *aux_out = outputs
 
+            # Name may optionally contain a suffix of the form /seedN where N is an
+            # integer. We only care about the part before the slash.
             name = module_to_name[module]
-            output_dict[name] = outputs.flatten(0, 1)
 
-            # Remember the inputs if we're training a transcoder
-            if self.cfg.transcode:
-                input_dict[name] = inputs.flatten(0, 1)
+            # Remember the original output shape since we'll need it for e2e training
+            out_shape = outputs.shape
+
+            # Flatten the batch and sequence dimensions
+            outputs = outputs.flatten(0, 1)
+            inputs = inputs.flatten(0, 1) if self.cfg.transcode else outputs
+            raw = self.saes[name]
+
+            # On the first iteration, initialize the decoder bias
+            if self.global_step == 0:
+                mean = self.maybe_all_reduce(outputs.mean(0))
+                raw.b_dec.data = mean.to(raw.dtype)
+            
+            # Make sure the W_dec is still unit-norm if we're autoencoding
+            if raw.cfg.normalize_decoder and not self.cfg.transcode:
+                raw.set_decoder_norm_to_unit_norm()
+
+            wrapped = maybe_wrapped[name]
+            out = wrapped(
+                x=inputs,
+                y=outputs,
+                dead_mask=(
+                    self.num_tokens_since_fired[name]
+                    > self.cfg.dead_feature_threshold
+                    if self.cfg.auxk_alpha > 0
+                    else None
+                ),
+            )
+            avg_fvu[name] += float(
+                self.maybe_all_reduce(out.fvu.detach()) / denom
+            )
+            if self.cfg.auxk_alpha > 0:
+                avg_auxk_loss[name] += float(
+                    self.maybe_all_reduce(out.auxk_loss.detach()) / denom
+                )
+            if self.cfg.sae.multi_topk:
+                avg_multi_topk_fvu[name] += float(
+                    self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
+                )
+
+            # Update the did_fire mask
+            did_fire[name][out.latent_indices.flatten()] = True
+            self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
+
+            loss = (
+                out.fvu
+                + self.cfg.auxk_alpha * out.auxk_loss
+                + out.multi_topk_fvu / 8
+            )
+            if self.cfg.end_to_end:
+                aux_loss += loss
+
+                # Replace the normal output with the SAE output
+                output = out.sae_out.reshape(out_shape).type_as(outputs)
+                return (output, *aux_out) if aux_out is not None else output
+
+            # Do a "local" backward pass if we're not training end-to-end
+            loss.div(acc_steps).backward()
 
         for batch in dl:
-            input_dict.clear()
-            output_dict.clear()
+            if not maybe_wrapped:
+                # Wrap the SAEs with Distributed Data Parallel. We have to do this
+                # after we set the decoder bias, otherwise DDP will not register
+                # gradients flowing to the bias after the first step.
+                maybe_wrapped = (
+                    {
+                        name: DDP(
+                            sae,
+                            device_ids=[dist.get_rank()],
+                            find_unused_parameters=self.cfg.end_to_end,
+                        )
+                        for name, sae in self.saes.items()
+                    }
+                    if ddp
+                    else self.saes
+                )
 
             # Bookkeeping for dead feature detection
             N = batch["input_ids"].numel()
@@ -246,91 +331,32 @@ class SaeTrainer:
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
             try:
-                with torch.no_grad():
-                    self.model(batch["input_ids"].to(device))
+                ce_loss = None
+                x = batch["input_ids"].to(device)
+
+                # If we're training end-to-end, we need to pass the labels to the model
+                # and do a backward pass through the entire model.
+                if self.cfg.end_to_end:
+                    ce_loss = self.model(x, labels=x).loss
+
+                    alpha = self.cfg.local_loss_weight
+                    loss = (
+                        # Normalize the CE loss by log(vocab_size) to compare with FVU
+                        (1 - alpha) * ce_loss / math.log(self.model.config.vocab_size) +
+                        # Normalize the aux loss by the number of SAEs
+                        alpha * aux_loss / len(self.saes)
+                    )
+                    loss.div(acc_steps).backward()
+                else:
+                    self.model(x)
             finally:
+                aux_loss = 0.0
                 for handle in handles:
                     handle.remove()
 
-            if self.cfg.distribute_modules:
-                input_dict = self.scatter_hiddens(input_dict)
-                output_dict = self.scatter_hiddens(output_dict)
-
-            for name, raw in self.saes.items():
-                # Name may optionally contain a suffix of the form /seedN where N is an
-                # integer. We only care about the part before the slash.
-                hookpoint, _, _ = name.partition("/")
-
-                # 'inputs' is distinct from outputs iff we're transcoding
-                outputs = output_dict[hookpoint]
-                inputs = input_dict.get(name, outputs)
-
-                # On the first iteration, initialize the decoder bias
-                if self.global_step == 0:
-                    mean = self.maybe_all_reduce(outputs.mean(0))
-                    raw.b_dec.data = mean.to(raw.dtype)
-
-                if not maybe_wrapped:
-                    # Wrap the SAEs with Distributed Data Parallel. We have to do this
-                    # after we set the decoder bias, otherwise DDP will not register
-                    # gradients flowing to the bias after the first step.
-                    maybe_wrapped = (
-                        {
-                            name: DDP(sae, device_ids=[dist.get_rank()])
-                            for name, sae in self.saes.items()
-                        }
-                        if ddp
-                        else self.saes
-                    )
-
-                # Make sure the W_dec is still unit-norm if we're autoencoding
-                if raw.cfg.normalize_decoder and not self.cfg.transcode:
-                    raw.set_decoder_norm_to_unit_norm()
-
-                acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
-                denom = acc_steps * self.cfg.wandb_log_frequency
-                wrapped = maybe_wrapped[name]
-
-                # Save memory by chunking the activations
-                in_chunks = inputs.chunk(self.cfg.micro_acc_steps)
-                out_chunks = outputs.chunk(self.cfg.micro_acc_steps)
-                for in_chunk, out_chunk in zip(in_chunks, out_chunks):
-                    out = wrapped(
-                        x=in_chunk,
-                        y=out_chunk,
-                        dead_mask=(
-                            self.num_tokens_since_fired[name]
-                            > self.cfg.dead_feature_threshold
-                            if self.cfg.auxk_alpha > 0
-                            else None
-                        ),
-                    )
-
-                    avg_fvu[name] += float(
-                        self.maybe_all_reduce(out.fvu.detach()) / denom
-                    )
-                    if self.cfg.auxk_alpha > 0:
-                        avg_auxk_loss[name] += float(
-                            self.maybe_all_reduce(out.auxk_loss.detach()) / denom
-                        )
-                    if self.cfg.sae.multi_topk:
-                        avg_multi_topk_fvu[name] += float(
-                            self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
-                        )
-
-                    loss = (
-                        out.fvu
-                        + self.cfg.auxk_alpha * out.auxk_loss
-                        + out.multi_topk_fvu / 8
-                    )
-                    loss.div(acc_steps).backward()
-
-                    # Update the did_fire mask
-                    did_fire[name][out.latent_indices.flatten()] = True
-                    self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
-
-                # Clip gradient norm independently for each SAE
-                torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
+            #if self.cfg.distribute_modules:
+            #    input_dict = self.scatter_hiddens(input_dict)
+            #    output_dict = self.scatter_hiddens(output_dict)
 
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
@@ -360,6 +386,8 @@ class SaeTrainer:
                     and (step + 1) % self.cfg.wandb_log_frequency == 0
                 ):
                     info = {}
+                    if ce_loss is not None:
+                        info["ce_loss"] = ce_loss.item()
 
                     for name in self.saes:
                         mask = (

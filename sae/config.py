@@ -35,11 +35,17 @@ class TrainConfig(Serializable):
     batch_size: int = 8
     """Batch size measured in sequences."""
 
+    end_to_end: bool = False
+    """Train all the sparse coders end-to-end."""
+
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
     micro_acc_steps: int = 1
     """Chunk the activations into this number of microbatches for SAE training."""
+
+    local_loss_weight: float = 0.0
+    """Weight of the local loss term for end-to-end training."""
 
     lr: float | None = None
     """Base LR. If None, it is automatically chosen based on the number of latents."""
