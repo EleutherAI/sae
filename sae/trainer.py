@@ -20,7 +20,7 @@ from transformers import (
 from .config import TrainConfig
 from .data import MemmapDataset
 from .sae import Sae
-from .utils import get_layer_list, resolve_widths
+from .utils import get_layer_list, resolve_widths, set_submodule
 
 
 class SaeTrainer:
@@ -55,6 +55,12 @@ class SaeTrainer:
             # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
+        
+        # If doing end-to-end, then we don't actually want to run the modules that
+        # we're replacing
+        if cfg.end_to_end:
+            for hook in cfg.hookpoints:
+                set_submodule(model.base_model, hook, nn.Identity())
 
         self.cfg = cfg
         self.dataset = dataset
@@ -93,7 +99,7 @@ class SaeTrainer:
         if cfg.transcode:
             for sae in self.saes.values():
                 assert sae.W_dec is not None
-                nn.init.orthogonal_(sae.W_dec.data)
+                nn.init.kaiming_normal_(sae.W_dec.data)
 
         pgs = [
             {
@@ -289,19 +295,19 @@ class SaeTrainer:
             did_fire[name][out.latent_indices.flatten()] = True
             self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
 
-            loss = (
-                out.fvu
-                + self.cfg.auxk_alpha * out.auxk_loss
-                + out.multi_topk_fvu / 8
-            )
             if self.cfg.end_to_end:
-                aux_loss += loss
+                #aux_loss += loss
 
                 # Replace the normal output with the SAE output
                 output = out.sae_out.reshape(out_shape).type_as(outputs)
                 return (output, *aux_out) if aux_out is not None else output
 
             # Do a "local" backward pass if we're not training end-to-end
+            loss = (
+                out.fvu
+                + self.cfg.auxk_alpha * out.auxk_loss
+                + out.multi_topk_fvu / 8
+            )
             loss.div(acc_steps).backward()
 
         for batch in dl:
