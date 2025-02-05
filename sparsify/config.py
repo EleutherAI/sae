@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
-from simple_parsing import Serializable, list_field
+from simple_parsing import Serializable
+from simple_parsing.helpers.fields import list_field, dict_field
 
 
 @dataclass
@@ -26,6 +27,17 @@ class SaeConfig(Serializable):
 
     skip_connection: bool = False
     """Include a linear skip connection."""
+    
+    e2e_kl_coeff: float = 1e-2
+    # e2e_kl_coeff: float = 0.0
+    """End-to-end KL loss weight. Turns off KL loss if set to 0."""
+    
+    e2e_start: int = 10  # float("inf")
+    """When to turn on the end-to-end loss."""
+    
+    @property
+    def has_e2e_loss(self) -> bool:
+        return self.e2e_kl_coeff > 0.0
 
 
 @dataclass
@@ -54,6 +66,9 @@ class TrainConfig(Serializable):
 
     hookpoints: list[str] = list_field()
     """List of hookpoints to train SAEs on."""
+    
+    checkpoints: dict[str, str] = dict_field()
+    """Dictionary of hookpoints to skip execution up to for each of the hookpoints."""
 
     init_seeds: list[int] = list_field(0)
     """List of random seeds to use for initialization. If more than one, train an SAE
@@ -73,6 +88,9 @@ class TrainConfig(Serializable):
 
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
+    
+    use_causal_lm: bool = True
+    """Whether to use the causal LM variant (needs to change hookpoints)"""
 
     log_to_wandb: bool = True
     run_name: str | None = None

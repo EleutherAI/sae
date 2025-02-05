@@ -2,6 +2,8 @@ from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from typing import Sized
+from functools import partial
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -13,6 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+from transformers.cache_utils import DynamicCache
 
 from .config import TrainConfig
 from .data import MemmapDataset
@@ -47,6 +50,11 @@ class SaeTrainer:
             # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
+            cfg.checkpoints = {
+                f"{layers_name}.{i}": f"{layers_name}.{i-1}"
+                for i in cfg.layers
+                if i > 0
+            }
 
         self.cfg = cfg
         self.dataset = dataset
@@ -216,6 +224,7 @@ class SaeTrainer:
         name_to_module = {
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
+        checkpoint_dict: dict[str, Tensor] = {}
         maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
@@ -233,9 +242,50 @@ class SaeTrainer:
             if self.cfg.transcode:
                 input_dict[name] = inputs.flatten(0, 1)
 
+        def checkpoint_hook(_module: nn.Module, _inputs, outputs, *, module_name: str):
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+            checkpoint_dict[module_name] = outputs
+
+        def replace_hook(module, inputs, outputs, break_graph=False, *, replacement):
+            if isinstance(outputs, tuple):
+                target = outputs[0]
+            else:
+                target = outputs
+            replacement = replacement.to(target)
+            if replacement.shape != target.shape:
+                replacement = replacement.view(target.shape)
+            if break_graph:
+                replacement = replacement.detach()
+            if isinstance(outputs, tuple):
+                return (replacement,) + outputs[1:]
+            return replacement
+        for param in self.model.parameters():
+            param.requires_grad = False
+        @partial(torch.compile)
+        def model_logit_fn(hookpoint, input_ids, replacement, checkpoint=None):
+            if checkpoint is not None:
+                checkpoint, checkpoint_chunk = checkpoint
+                handle_checkpoint = self.model.get_submodule(checkpoint).register_forward_hook(partial(replace_hook, replacement=checkpoint_chunk, break_graph=True))
+            handle = name_to_module[hookpoint].register_forward_hook(partial(replace_hook, replacement=replacement))
+            logits = self.model(
+                input_ids, use_cache=False, output_hidden_states=False, output_attentions=False
+            ).logits
+            handle.remove()
+            if checkpoint is not None:
+                handle_checkpoint.remove()
+            return logits
+
         for batch in dl:
             input_dict.clear()
             output_dict.clear()
+            
+            use_e2e = self.global_step >= self.cfg.sae.e2e_start
+            if use_e2e:
+                try:
+                    avg_e2e_kl
+                except NameError:
+                    avg_e2e_kl = defaultdict(float)
 
             # Bookkeeping for dead feature detection
             N = batch["input_ids"].numel()
@@ -245,11 +295,22 @@ class SaeTrainer:
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
             ]
+            checkpoint_handles = {
+                checkpoint: self.model.get_submodule(checkpoint).register_forward_hook(
+                    partial(checkpoint_hook, module_name=checkpoint))
+                for checkpoint in set(self.cfg.checkpoints.values())
+            }
             try:
                 with torch.no_grad():
-                    self.model(batch["input_ids"].to(device))
+                    logits = self.model(batch["input_ids"].to(device))
+                    if not use_e2e:
+                        del logits
+                    else:
+                        logits = nn.functional.log_softmax(logits.logits, dim=-1)
             finally:
                 for handle in handles:
+                    handle.remove()
+                for handle in checkpoint_handles.values():
                     handle.remove()
 
             if self.cfg.distribute_modules:
@@ -264,6 +325,11 @@ class SaeTrainer:
                 # 'inputs' is distinct from outputs iff we're transcoding
                 outputs = output_dict[hookpoint]
                 inputs = input_dict.get(name, outputs)
+                
+                is_checkpointed = hookpoint in self.cfg.checkpoints and use_e2e
+                if is_checkpointed:
+                    checkpoint = self.cfg.checkpoints[hookpoint]
+                    checkpoints = checkpoint_dict[checkpoint]
 
                 # On the first iteration, initialize the decoder bias
                 if self.global_step == 0:
@@ -294,7 +360,12 @@ class SaeTrainer:
                 # Save memory by chunking the activations
                 in_chunks = inputs.chunk(self.cfg.micro_acc_steps)
                 out_chunks = outputs.chunk(self.cfg.micro_acc_steps)
-                for in_chunk, out_chunk in zip(in_chunks, out_chunks):
+                if is_checkpointed:
+                    checkpoint_chunks = checkpoints.chunk(self.cfg.micro_acc_steps)
+                if use_e2e:
+                    input_id_chunks = batch["input_ids"].to(device).chunk(self.cfg.micro_acc_steps)
+                    logit_chunks = logits.chunk(self.cfg.micro_acc_steps)
+                for chunk_idx, (in_chunk, out_chunk) in enumerate(zip(in_chunks, out_chunks)):
                     out = wrapped(
                         x=in_chunk,
                         y=out_chunk,
@@ -323,7 +394,22 @@ class SaeTrainer:
                         + self.cfg.auxk_alpha * out.auxk_loss
                         + out.multi_topk_fvu / 8
                     )
-                    loss.div(acc_steps).backward()
+                    
+                    if use_e2e:
+                        with torch.set_grad_enabled(bool(self.cfg.sae.has_e2e_loss)):
+                            checkpoint_arg = ((checkpoint, checkpoint_chunks[chunk_idx].detach()),) if is_checkpointed else ()
+                            logits_replaced = model_logit_fn(hookpoint, input_id_chunks[chunk_idx], out.sae_out, *checkpoint_arg)
+                        kl_loss = nn.functional.kl_div(
+                            nn.functional.log_softmax(logits_replaced, dim=-1),
+                            logit_chunks[chunk_idx],
+                            reduction="sum",
+                            log_target=True
+                        ) / float(np.prod(logits.shape[:-1]))
+                        avg_e2e_kl[name] += float(self.maybe_all_reduce(kl_loss.detach()) / denom)
+                        if self.cfg.sae.e2e_kl_coeff:
+                            loss.add_(kl_loss.mul(self.cfg.sae.e2e_kl_coeff))
+
+                    loss.div(acc_steps).backward(retain_graph=True)
 
                     # Update the did_fire mask
                     did_fire[name][out.latent_indices.flatten()] = True
@@ -379,10 +465,14 @@ class SaeTrainer:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
                             info[f"multi_topk_fvu/{name}"] = avg_multi_topk_fvu[name]
+                        if use_e2e:
+                            info[f"kl/{name}"] = avg_e2e_kl[name]
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
                     avg_multi_topk_fvu.clear()
+                    if use_e2e:
+                        avg_e2e_kl.clear()
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]

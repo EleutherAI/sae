@@ -9,7 +9,7 @@ import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from safetensors.torch import load_model
 from simple_parsing import field, parse
-from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from .data import MemmapDataset, chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig
@@ -48,7 +48,7 @@ class RunConfig(TrainConfig):
     """Maximum number of examples to use for training."""
 
     resume: bool = False
-    """Whether to try resuming from the checkpoint present at `run_name`."""
+    """Whether to try resuming from the      present at `run_name`."""
 
     text_column: str = "text"
     """Column name to use for text data."""
@@ -75,7 +75,10 @@ def load_artifacts(
     else:
         dtype = "auto"
 
-    model = AutoModel.from_pretrained(
+    model_cls = AutoModel
+    if args.use_causal_lm:
+        model_cls = AutoModelForCausalLM
+    model = model_cls.from_pretrained(
         args.model,
         device_map={"": f"cuda:{rank}"},
         quantization_config=(
