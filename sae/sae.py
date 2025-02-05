@@ -44,17 +44,28 @@ class ForwardOutput(NamedTuple):
 
 
 class PKMLinear(nn.Module):
-    def __init__(self, d_in: int, num_latents: int, device: str | torch.device, dtype: torch.dtype | None = None):
+    def __init__(self,
+                 d_in: int, num_latents: int,
+                 device: str | torch.device,
+                 dtype: torch.dtype | None = None,
+                 *,
+                 cfg: SaeConfig
+                 ):
         super().__init__()
         self.d_in = d_in
         self.num_latents = num_latents
-        # self.pkm_base = int(math.ceil(math.sqrt(num_latents)))
-        self.pkm_base = int(2 ** math.ceil(math.log2(num_latents) / 2))
+        if cfg.pkm_pad:
+            self.pkm_base = int(2 ** math.ceil(math.log2(num_latents) / 2))
+        else:
+            self.pkm_base = int(math.ceil(math.sqrt(num_latents)))
+        self.cfg = cfg
         self._weight = nn.Linear(d_in, 2 * self.pkm_base, device=device, dtype=dtype)
-        self._weight.weight.data /= 4
+        self._weight.weight.data *= cfg.pkm_init_scale / 4
         # Orthogonal matrices have the same FVU  as /4, but produce more dead latents
         # torch.nn.init.orthogonal_(self._weight.weight, gain=0.5 / math.sqrt(self.d_in))
         self._scale = nn.Parameter(torch.zeros(1, dtype=dtype, device=device))
+        if cfg.pkm_bias:
+            self.bias = nn.Parameter(torch.zeros(self.pkm_base**2, dtype=dtype, device=device))
         
     def forward(self, x):
         x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
@@ -65,18 +76,25 @@ class PKMLinear(nn.Module):
 
     @torch.compile(mode="max-autotune")
     def topk(self, x, k: int):
-        # x = x * torch.exp(self._scale)
         orig_batch_size = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
         x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
-        # x1, x2 = torch.chunk(x[..., :self.pkm_base * 2], 2, dim=-1)
+        if not self.cfg.topk_separate:
+            x = (x1[:, :, None] + x2[:, None, :]).view(-1, self.pkm_base**2)
+            if self.cfg.pkm_bias:
+                x += self.bias
+            return x.topk(k, dim=-1)
         k1, k2 = k, k
         w1, i1 = x1.topk(k1, dim=1)
         w2, i2 = x2.topk(k2, dim=1)
-        w = (w1[:, :, None] + w2[:, None, :]).view(-1, k1 * k2)
-        w, i_ = w.topk(k, dim=-1)
-        i1 = torch.gather(i1, 1, i_ // k2)
-        i2 = torch.gather(i2, 1, i_ % k2)
+        w = w1[:, :, None] + w2[:, None, :]
+        i = i1[:, :, None] * self.pkm_base + i2[:, None, :]
+        if self.cfg.pkm_bias:
+            w = w + self.bias[i]
+        w = w.view(-1, k1 * k2)
+        w, i = w.topk(k, dim=-1)
+        i1 = torch.gather(i1, 1, i // k2)
+        i2 = torch.gather(i2, 1, i % k2)
         i = i1 * self.pkm_base + i2
         return w.view(*orig_batch_size, k), i.reshape(*orig_batch_size, k)
 
@@ -118,7 +136,7 @@ class Sae(nn.Module):
             # https://github.com/joennlae/halutmatmul/blob/master/src/python/halutmatmul/model.py#L92
             self.encoder.bias.data.zero_()
         elif cfg.encoder_pkm:
-            self.encoder = PKMLinear(d_in, self.num_latents, device=device, dtype=dtype)
+            self.encoder = PKMLinear(d_in, self.num_latents, device=device, dtype=dtype, cfg=cfg)
             self.encoder._weight.bias.data.zero_()
         else:
             self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)

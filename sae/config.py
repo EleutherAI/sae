@@ -9,7 +9,7 @@ class SaeConfig(Serializable):
     Configuration for training a sparse autoencoder on a language model.
     """
 
-    expansion_factor: int = 64
+    expansion_factor: int = 128
     """Multiple of the input dimension to use as the SAE dimension."""
 
     normalize_decoder: bool = True
@@ -20,6 +20,18 @@ class SaeConfig(Serializable):
     
     encoder_pkm: bool = True
     """Whether to use Product Key Memory for the encoder weights."""
+
+    pkm_pad: bool = False
+    """Pad the PKM encoder to a power of 2."""
+
+    topk_separate: bool = True
+    """Faster top-k for PKM by separating the top-k operation."""
+
+    pkm_bias: bool = True
+    """Non-decomposed bias for PKM."""
+    
+    pkm_init_scale: float = 1.0
+    """Scale factor for PKM encoder initialization."""
 
     num_latents: int = 0
     """Number of latents to use. If 0, use `expansion_factor`."""
