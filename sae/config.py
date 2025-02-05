@@ -32,6 +32,9 @@ class SaeConfig(Serializable):
     
     pkm_init_scale: float = 1.0
     """Scale factor for PKM encoder initialization."""
+    
+    decoder_xformers: bool = False
+    """Xformers implementation for the decoder."""
 
     num_latents: int = 0
     """Number of latents to use. If 0, use `expansion_factor`."""

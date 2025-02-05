@@ -14,6 +14,7 @@ from torch import Tensor, nn
 
 from .config import SaeConfig
 from .utils import decoder_impl
+from .xformers_decoder import xformers_embedding_bag
 
 
 class EncoderOutput(NamedTuple):
@@ -268,7 +269,10 @@ class Sae(nn.Module):
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
-        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        if self.cfg.decoder_xformers:
+            y = xformers_embedding_bag(top_indices, self.W_dec, top_acts.to(torch.bfloat16))
+        else:
+            y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
     # Wrapping the forward in bf16 autocast improves performance by almost 2x
