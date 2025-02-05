@@ -28,16 +28,19 @@ class SaeConfig(Serializable):
     skip_connection: bool = False
     """Include a linear skip connection."""
     
-    e2e_kl_coeff: float = 1e-2
+    e2e_kl_coeff: float = 1e-5
     # e2e_kl_coeff: float = 0.0
     """End-to-end KL loss weight. Turns off KL loss if set to 0."""
     
-    e2e_start: int = 10  # float("inf")
+    e2e_mse_coeff: float = 1e-1
+    """End-to-end MSE loss weight."""
+    
+    e2e_start: int = 500  # float("inf")
     """When to turn on the end-to-end loss."""
     
     @property
     def has_e2e_loss(self) -> bool:
-        return self.e2e_kl_coeff > 0.0
+        return self.e2e_kl_coeff > 0.0 or self.e2e_mse_coeff > 0.0
 
 
 @dataclass
@@ -69,6 +72,9 @@ class TrainConfig(Serializable):
     
     checkpoints: dict[str, str] = dict_field()
     """Dictionary of hookpoints to skip execution up to for each of the hookpoints."""
+    
+    e2e_mse_hookpoints: list[str] = list_field()
+    """List of hookpoints for end-to-end MSE loss."""
 
     init_seeds: list[int] = list_field(0)
     """List of random seeds to use for initialization. If more than one, train an SAE

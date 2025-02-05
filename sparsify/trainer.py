@@ -225,6 +225,7 @@ class SaeTrainer:
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
         checkpoint_dict: dict[str, Tensor] = {}
+        e2e_ref_dict: dict[str, Tensor] = {}
         maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
@@ -246,6 +247,11 @@ class SaeTrainer:
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
             checkpoint_dict[module_name] = outputs
+        
+        def record_e2e_ref_hook(_module, _inputs, outputs, *, module_name: str, save_to: dict[str, Tensor]):
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+            save_to[module_name] = outputs
 
         def replace_hook(module, inputs, outputs, break_graph=False, *, replacement):
             if isinstance(outputs, tuple):
@@ -268,24 +274,29 @@ class SaeTrainer:
                 checkpoint, checkpoint_chunk = checkpoint
                 handle_checkpoint = self.model.get_submodule(checkpoint).register_forward_hook(partial(replace_hook, replacement=checkpoint_chunk, break_graph=True))
             handle = name_to_module[hookpoint].register_forward_hook(partial(replace_hook, replacement=replacement))
+            e2e_rep_handles = {}
+            e2e_rep_dict = {}
+            for hp in self.cfg.e2e_mse_hookpoints:
+                e2e_rep_handles[hp] = self.model.get_submodule(hp).register_forward_hook(partial(record_e2e_ref_hook, module_name=hp, save_to=e2e_rep_dict))
             logits = self.model(
                 input_ids, use_cache=False, output_hidden_states=False, output_attentions=False
             ).logits
+            for h in e2e_rep_handles.values():
+                h.remove()
             handle.remove()
             if checkpoint is not None:
                 handle_checkpoint.remove()
-            return logits
+            return logits, e2e_rep_dict
 
         for batch in dl:
             input_dict.clear()
             output_dict.clear()
+            checkpoint_dict.clear()
+            e2e_ref_dict.clear()
             
             use_e2e = self.global_step >= self.cfg.sae.e2e_start
-            if use_e2e:
-                try:
-                    avg_e2e_kl
-                except NameError:
-                    avg_e2e_kl = defaultdict(float)
+            avg_e2e_kl = defaultdict(float)
+            avg_e2e_mse = defaultdict(float)
 
             # Bookkeeping for dead feature detection
             N = batch["input_ids"].numel()
@@ -300,6 +311,11 @@ class SaeTrainer:
                     partial(checkpoint_hook, module_name=checkpoint))
                 for checkpoint in set(self.cfg.checkpoints.values())
             }
+            e2e_ref_handles = {
+                hookpoint: self.model.get_submodule(hookpoint).register_forward_hook(
+                    partial(record_e2e_ref_hook, module_name=hookpoint, save_to=e2e_ref_dict))
+                for hookpoint in set(self.cfg.e2e_mse_hookpoints)
+            }
             try:
                 with torch.no_grad():
                     logits = self.model(batch["input_ids"].to(device))
@@ -308,6 +324,8 @@ class SaeTrainer:
                     else:
                         logits = nn.functional.log_softmax(logits.logits, dim=-1)
             finally:
+                for handle in e2e_ref_handles.values():
+                    handle.remove()
                 for handle in handles:
                     handle.remove()
                 for handle in checkpoint_handles.values():
@@ -365,6 +383,10 @@ class SaeTrainer:
                 if use_e2e:
                     input_id_chunks = batch["input_ids"].to(device).chunk(self.cfg.micro_acc_steps)
                     logit_chunks = logits.chunk(self.cfg.micro_acc_steps)
+                    e2e_ref_chunks = {
+                        hookpoint: e2e_ref_dict[hookpoint].chunk(self.cfg.micro_acc_steps)
+                        for hookpoint in self.cfg.e2e_mse_hookpoints
+                    }
                 for chunk_idx, (in_chunk, out_chunk) in enumerate(zip(in_chunks, out_chunks)):
                     out = wrapped(
                         x=in_chunk,
@@ -398,7 +420,10 @@ class SaeTrainer:
                     if use_e2e:
                         with torch.set_grad_enabled(bool(self.cfg.sae.has_e2e_loss)):
                             checkpoint_arg = ((checkpoint, checkpoint_chunks[chunk_idx].detach()),) if is_checkpointed else ()
-                            logits_replaced = model_logit_fn(hookpoint, input_id_chunks[chunk_idx], out.sae_out, *checkpoint_arg)
+                            logits_replaced, e2e_rep_dict = model_logit_fn(hookpoint, input_id_chunks[chunk_idx], out.sae_out, *checkpoint_arg)
+                        e2e_rep_loss = torch.zeros((), device=device, dtype=torch.float32)
+                        for hookpoint, e2e_rep in e2e_rep_dict.items():
+                            e2e_rep_loss += torch.nn.functional.mse_loss(e2e_rep, e2e_ref_chunks[hookpoint][chunk_idx], reduce="mean") / len(e2e_rep_dict)
                         kl_loss = nn.functional.kl_div(
                             nn.functional.log_softmax(logits_replaced, dim=-1),
                             logit_chunks[chunk_idx],
@@ -406,8 +431,14 @@ class SaeTrainer:
                             log_target=True
                         ) / float(np.prod(logits.shape[:-1]))
                         avg_e2e_kl[name] += float(self.maybe_all_reduce(kl_loss.detach()) / denom)
+                        avg_e2e_mse[name] += float(self.maybe_all_reduce(e2e_rep_loss.detach()) / denom)
                         if self.cfg.sae.e2e_kl_coeff:
                             loss.add_(kl_loss.mul(self.cfg.sae.e2e_kl_coeff))
+                        if self.cfg.sae.e2e_mse_coeff:
+                            loss.add_(e2e_rep_loss.mul(self.cfg.sae.e2e_mse_coeff))
+                        if e2e_rep_dict:
+                            del e2e_rep
+                        del kl_loss, e2e_rep_loss, logits_replaced, e2e_rep_dict
 
                     loss.div(acc_steps).backward(retain_graph=True)
 
@@ -465,14 +496,17 @@ class SaeTrainer:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
                             info[f"multi_topk_fvu/{name}"] = avg_multi_topk_fvu[name]
-                        if use_e2e:
+                        if name in avg_e2e_kl:
                             info[f"kl/{name}"] = avg_e2e_kl[name]
+                        if name in avg_e2e_mse:
+                            info[f"e2e-mse/{name}"] = avg_e2e_mse[name]
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
                     avg_multi_topk_fvu.clear()
                     if use_e2e:
                         avg_e2e_kl.clear()
+                        avg_e2e_mse.clear()
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
