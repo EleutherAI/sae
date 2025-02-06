@@ -99,23 +99,19 @@ def embedding_bag_k(
     weight_ptr,  # [n_keys**2, dim]
     per_sample_weights,  # [B, bag_size]
     dim: tl.constexpr,
-    dim_pad2: tl.constexpr,
+    dim_padded: tl.constexpr,
     bag_size: tl.constexpr,
 ):
     out_idx = tl.program_id(axis=0).to(tl.int64)
-    out_value = tl.zeros([dim_pad2], dtype=tl.float32)
+    out_value = tl.zeros([dim_padded], dtype=tl.float32)
+    dim_mask =  (tl.arange(0, dim_padded) < dim)
     for bag in range(0, bag_size):
         my_index = tl.load(indices_ptr + out_idx * bag_size + bag).to(tl.int64)
         my_scaling = tl.load(per_sample_weights + out_idx * bag_size + bag)
-        my_weight = tl.load(weight_ptr + tl.arange(0, dim_pad2) + my_index * dim)
-        my_weight = my_weight * (tl.arange(0, dim_pad2) < dim)
+        my_weight = tl.load(weight_ptr + tl.arange(0, dim_padded) + my_index * dim)
         out_value = out_value + my_weight.to(tl.float32) * my_scaling
-    tl.store(out_ptr + out_idx * dim + tl.arange(0, dim_pad2), out_value,
-             mask=tl.arange(0, dim_pad2) < dim)
-
-
-def pad2(x):
-    return int(2 ** (x - 1).bit_length())
+    tl.store(out_ptr + out_idx * dim + tl.arange(0, dim_padded), out_value,
+             mask=dim_mask)
 
 
 def embedding_bag_triton(
@@ -138,7 +134,7 @@ def embedding_bag_triton(
         weight,
         per_sample_weights,
         dim=weight.shape[-1],
-        dim_pad2=pad2(weight.shape[-1]),
+        dim_padded=triton.next_power_of_2(weight.shape[-1]),
         bag_size=indices.shape[1],
         num_warps=1,
         num_stages=1,
@@ -319,7 +315,7 @@ def aggregate_gradient_for_embedding_k(
     per_sample_weights_ptr,  # [B, bag_size]
     gradient_ptr,  # [B, dim]
     dim: tl.constexpr,
-    dim_pad2: tl.constexpr,
+    dim_padded: tl.constexpr,
     bag_size: tl.constexpr,
     B: tl.constexpr,
     K: tl.constexpr,
@@ -330,29 +326,29 @@ def aggregate_gradient_for_embedding_k(
         embedding_id = first_embedding_id + (K // BLOCK_SIZE) * k
         # embedding_id = first_embedding_id * BLOCK_SIZE + k
         embedding_id = tl.load(emb_argsorted_ptr + embedding_id).to(tl.int64)
-        weight_grad = tl.zeros([dim_pad2], dtype=tl.float32)
+        weight_grad = tl.zeros([dim_padded], dtype=tl.float32)
         begin = tl.load(emb_begin_pos_ptr + embedding_id)
         end = tl.load(emb_begin_pos_ptr + embedding_id + 1)
-        dim_mask = tl.arange(0, dim_pad2) < dim
+        dim_mask = tl.arange(0, dim_padded) < dim
         weight = tl.load(
-            weight_ptr + embedding_id * dim + tl.arange(0, dim_pad2),
+            weight_ptr + embedding_id * dim + tl.arange(0, dim_padded),
             mask=dim_mask,
-        ).to(tl.float32) * dim_mask
+        ).to(tl.float32)
         for idx in range(begin, end):
             output_indice_id = tl.load(reverse_mapping_ptr + idx).to(tl.int64)
             batch_id = output_indice_id // bag_size
             bag_id = output_indice_id % bag_size
             per_sample_w = tl.load(per_sample_weights_ptr + output_indice_id)
-            gradient = tl.load(gradient_ptr + batch_id * dim + tl.arange(0, dim_pad2), mask=dim_mask).to(
+            gradient = tl.load(gradient_ptr + batch_id * dim + tl.arange(0, dim_padded), mask=dim_mask).to(
                 tl.float32
-            ) * dim_mask
+            )
             weight_grad = weight_grad + per_sample_w * gradient
             per_sample_weights_grad = gradient * weight
             per_sample_weights_grad = tl.sum(per_sample_weights_grad)
             tl.store(
                 per_sample_weights_grad_ptr + output_indice_id, per_sample_weights_grad
             )
-        tl.store(weight_grad_ptr + embedding_id * dim + tl.arange(0, dim_pad2), weight_grad, mask=dim_mask)
+        tl.store(weight_grad_ptr + embedding_id * dim + tl.arange(0, dim_padded), weight_grad, mask=dim_mask)
 
 
 def embedding_bag_bw_rev_indices(
@@ -401,7 +397,7 @@ def embedding_bag_bw_rev_indices(
         per_sample_weights_ptr=per_sample_weights,
         gradient_ptr=gradient,
         dim=dim,
-        dim_pad2=pad2(dim),
+        dim_padded=triton.next_power_of_2(dim),
         bag_size=bag_size,
         B=B,
         K=K,
