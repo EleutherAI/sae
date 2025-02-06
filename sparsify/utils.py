@@ -61,9 +61,9 @@ def resolve_widths(
 
 # Fallback implementation of SAE decoder
 def eager_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
-    buf = top_acts.new_zeros(top_acts.shape[:-1] + (W_dec.shape[-1],))
-    acts = buf.scatter_(dim=-1, index=top_indices, src=top_acts)
-    return acts @ W_dec.mT
+    return nn.functional.embedding_bag(
+        top_indices, W_dec.mT, per_sample_weights=top_acts, mode='sum'
+    )
 
 
 # Triton implementation of SAE decoder
