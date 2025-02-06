@@ -225,11 +225,6 @@ class SaeTrainer:
                 inputs = inputs[0]
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
-            
-            # Trim the BOS token if requested
-            if self.cfg.exclude_bos:
-                inputs = inputs[:, 1:]
-                outputs = outputs[:, 1:]
 
             name = module_to_name[module]
             output_dict[name] = outputs.flatten(0, 1)

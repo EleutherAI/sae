@@ -35,9 +35,6 @@ class TrainConfig(Serializable):
     batch_size: int = 8
     """Batch size measured in sequences."""
 
-    exclude_bos: bool = False
-    """Exclude the BOS token from the SAE training input."""
-
     grad_acc_steps: int = 1
     """Number of steps over which to accumulate gradients."""
 
