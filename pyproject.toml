@@ -3,8 +3,8 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sae"
-description = "Sparse autoencoders"
+name = "sparsify"
+description = "Sparsify transformers with SAEs and transcoders"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["interpretability", "explainable-ai"]
@@ -23,14 +23,14 @@ dependencies = [
 version = "0.1.0"
 
 [project.scripts]
-sae = "sae.__main__:run"
+sparsify = "sparsify.__main__:run"
 
 [tool.pyright]
-include = ["sae*"]
+include = ["sparsify*"]
 reportPrivateImportUsage = false
 
 [tool.setuptools.packages.find]
-include = ["sae*"]
+include = ["sparsify*"]
 
 [tool.ruff]
 # Enable pycodestyle (`E`), Pyflakes (`F`), and isort (`I`) codes

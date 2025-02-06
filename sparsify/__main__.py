@@ -18,13 +18,13 @@ from .trainer import SaeTrainer, TrainConfig
 @dataclass
 class RunConfig(TrainConfig):
     model: str = field(
-        default="EleutherAI/pythia-160m",
+        default="HuggingFaceTB/SmolLM2-135M",
         positional=True,
     )
     """Name of the model to train."""
 
     dataset: str = field(
-        default="togethercomputer/RedPajama-Data-1T-Sample",
+        default="EleutherAI/fineweb-edu-dedup-10b",
         positional=True,
     )
     """Path to the dataset to use for training."""

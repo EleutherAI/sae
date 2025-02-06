@@ -1,5 +1,5 @@
 ## Introduction
-This library trains _k_-sparse autoencoders (SAEs) on the residual stream activations of HuggingFace language models, roughly following the recipe detailed in [Scaling and evaluating sparse autoencoders](https://arxiv.org/abs/2406.04093v1) (Gao et al. 2024).
+This library trains _k_-sparse autoencoders (SAEs) and transcoders on the activations of HuggingFace language models, roughly following the recipe detailed in [Scaling and evaluating sparse autoencoders](https://arxiv.org/abs/2406.04093v1) (Gao et al. 2024).
 
 This is a lean, simple library with few configuration options. Unlike most other SAE libraries (e.g. [SAELens](https://github.com/jbloomAus/SAELens)), it does not cache activations on disk, but rather computes them on-the-fly. This allows us to scale to very large models and datasets with zero storage overhead, but has the downside that trying different hyperparameters for the same model and dataset will be slower than if we cached activations (since activations will be re-computed). We may add caching as an option in the future.
 
@@ -10,7 +10,7 @@ Following Gao et al., we use a TopK activation function which directly enforces 
 To load a pretrained SAE from the HuggingFace Hub, you can use the `Sae.load_from_hub` method as follows:
 
 ```python
-from sae import Sae
+from sparsify import Sae
 
 sae = Sae.load_from_hub("EleutherAI/sae-llama-3-8b-32x", hookpoint="layers.10")
 ```
@@ -47,10 +47,10 @@ with torch.inference_mode():
 To train SAEs from the command line, you can use the following command:
 
 ```bash
-python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
+python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
 ```
 
-The CLI supports all of the config options provided by the `TrainConfig` class. You can see them by running `python -m sae --help`.
+The CLI supports all of the config options provided by the `TrainConfig` class. You can see them by running `python -m sparsify --help`.
 
 Programmatic usage is simple. Here is an example:
 
@@ -59,8 +59,8 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sae import SaeConfig, SaeTrainer, TrainConfig
-from sae.data import chunk_and_tokenize
+from sparsify import SaeConfig, SaeTrainer, TrainConfig
+from sparsify.data import chunk_and_tokenize
 
 MODEL = "EleutherAI/pythia-160m"
 dataset = load_dataset(
@@ -91,7 +91,7 @@ trainer.fit()
 To finetune a pretrained SAE, pass its path to the `finetune` argument.
 
 ```bash
-python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --finetune EleutherAI/sae-pythia-160m-32x
+python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --finetune EleutherAI/sae-pythia-160m-32x
 ```
 
 ## Custom hookpoints
@@ -99,13 +99,13 @@ python -m sae EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample -
 By default, the SAEs are trained on the residual stream activations of the model. However, you can also train SAEs on the activations of any other submodule(s) by specifying custom hookpoint patterns. These patterns are like standard PyTorch module names (e.g. `h.0.ln_1`) but also allow [Unix pattern matching syntax](https://docs.python.org/3/library/fnmatch.html), including wildcards and character sets. For example, to train SAEs on the output of every attention module and the inner activations of every MLP in GPT-2, you can use the following code:
 
 ```bash
-python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.*.attn" "h.*.mlp.act"
+python -m sparsify gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.*.attn" "h.*.mlp.act"
 ```
 
 To restrict to the first three layers:
 
 ```bash
-python -m sae gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.[012].attn" "h.[012].mlp.act"
+python -m sparsify gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.[012].attn" "h.[012].mlp.act"
 ```
 
 We currently don't support fine-grained manual control over the learning rate, number of latents, or other hyperparameters on a hookpoint-by-hookpoint basis. By default, the `expansion_factor` option is used to select the appropriate number of latents for each hookpoint based on the width of that hookpoint's output. The default learning rate for each hookpoint is then set using an inverse square root scaling law based on the number of latents. If you manually set the number of latents or the learning rate, it will be applied to all hookpoints.
@@ -115,13 +115,13 @@ We currently don't support fine-grained manual control over the learning rate, n
 We support distributed training via PyTorch's `torchrun` command. By default we use the Distributed Data Parallel method, which means that the weights of each SAE are replicated on every GPU.
 
 ```bash
-torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --batch_size 1 --layers 16 24 --k 192 --grad_acc_steps 8 --ctx_len 2048
+torchrun --nproc_per_node gpu -m sparsify meta-llama/Meta-Llama-3-8B --batch_size 1 --layers 16 24 --k 192 --grad_acc_steps 8 --ctx_len 2048
 ```
 
 This is simple, but very memory inefficient. If you want to train SAEs for many layers of a model, we recommend using the `--distribute_modules` flag, which allocates the SAEs for different layers to different GPUs. Currently, we require that the number of GPUs evenly divides the number of layers you're training SAEs for.
 
 ```bash
-torchrun --nproc_per_node gpu -m sae meta-llama/Meta-Llama-3-8B --distribute_modules --batch_size 1 --layer_stride 2 --grad_acc_steps 8 --ctx_len 2048 --k 192 --load_in_8bit --micro_acc_steps 2
+torchrun --nproc_per_node gpu -m sparsify meta-llama/Meta-Llama-3-8B --distribute_modules --batch_size 1 --layer_stride 2 --grad_acc_steps 8 --ctx_len 2048 --k 192 --load_in_8bit --micro_acc_steps 2
 ```
 
 The above command trains an SAE for every _even_ layer of Llama 3 8B, using all available GPUs. It accumulates gradients over 8 minibatches, and splits each minibatch into 2 microbatches before feeding them into the SAE encoder, thus saving a lot of memory. It also loads the model in 8-bit precision using `bitsandbytes`. This command requires no more than 48GB of memory per GPU on an 8 GPU node.
