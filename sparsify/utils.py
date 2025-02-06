@@ -68,11 +68,11 @@ def eager_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
 
 # Triton implementation of SAE decoder
 def triton_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
-    return TritonDecoder.apply(top_indices, top_acts, W_dec)
+    return xformers_embedding_bag(top_indices, W_dec.mT, top_acts)
 
 
 try:
-    from .kernels import TritonDecoder
+    from .xformers import xformers_embedding_bag
 except ImportError:
     decoder_impl = eager_decode
     print("Triton not installed, using eager implementation of SAE decoder.")
