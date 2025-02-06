@@ -80,18 +80,18 @@ def set_submodule(model: nn.Module, submodule_path: str, new_submodule: nn.Modul
 
 # Fallback implementation of SAE decoder
 def eager_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
-    buf = top_acts.new_zeros(top_acts.shape[:-1] + (W_dec.shape[-1],))
-    acts = buf.scatter_(dim=-1, index=top_indices, src=top_acts)
-    return acts @ W_dec.mT
+    return nn.functional.embedding_bag(
+        top_indices, W_dec.mT, per_sample_weights=top_acts, mode='sum'
+    )
 
 
 # Triton implementation of SAE decoder
 def triton_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
-    return TritonDecoder.apply(top_indices, top_acts, W_dec)
+    return xformers_embedding_bag(top_indices, W_dec.mT, top_acts)
 
 
 try:
-    from .kernels import TritonDecoder
+    from .xformers import xformers_embedding_bag
 except ImportError:
     decoder_impl = eager_decode
     print("Triton not installed, using eager implementation of SAE decoder.")
