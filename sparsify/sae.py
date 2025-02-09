@@ -73,6 +73,8 @@ class PKMLinear(nn.Module):
         y = (x1[..., :, None] + x2[..., None, :]).reshape(
             *x.shape[:-1], self.pkm_base**2
         )[..., : self.num_latents]
+        if self.cfg.pkm_bias:
+            y += self.bias
         return y
 
     @torch.compile(mode="max-autotune")
