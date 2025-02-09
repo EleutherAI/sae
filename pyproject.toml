@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparsify"
-description = "Sparse autoencoders"
+description = "Sparsify transformers with SAEs and transcoders"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["interpretability", "explainable-ai"]
