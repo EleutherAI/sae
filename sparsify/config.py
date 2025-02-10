@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from simple_parsing import Serializable, list_field
 
+from .monet import MonetConfig
 
 @dataclass
 class SaeConfig(Serializable):
@@ -15,10 +16,20 @@ class SaeConfig(Serializable):
     normalize_decoder: bool = True
     """Normalize the decoder weights to have unit norm."""
     
+    monet: bool = False
+    """Use Monet architecture (router + MLP) for the SAE."""
+    
+    monet_config: MonetConfig = MonetConfig()
+    """Configuration for the Monet architecture."""
+    
+    encoder_mpnet: bool = False
+    """MPNet (matching pursuit) encoder."""
+    
     encoder_halut: bool = False
     """Whether to use hashed lookup tables for the encoder weights."""
     
-    encoder_pkm: bool = True
+    # uv run python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --encoder_pkm=True --transcode=True --run_name pkm_saes/with_pkm_transcoder
+    encoder_pkm: bool = False
     """Whether to use Product Key Memory for the encoder weights."""
 
     pkm_pad: bool = False
@@ -33,7 +44,7 @@ class SaeConfig(Serializable):
     pkm_init_scale: float = 1.0
     """Scale factor for PKM encoder initialization."""
     
-    decoder_xformers: bool = False
+    decoder_xformers: bool = True
     """Xformers implementation for the decoder."""
 
     num_latents: int = 0

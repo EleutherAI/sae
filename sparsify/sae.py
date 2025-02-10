@@ -15,6 +15,7 @@ from torch import Tensor, nn
 from .config import SaeConfig
 from .utils import decoder_impl
 from .xformers_decoder import xformers_embedding_bag
+from .monet import Monet, MonetConfig
 
 
 class EncoderOutput(NamedTuple):
@@ -69,24 +70,22 @@ class PKMLinear(nn.Module):
             self.bias = nn.Parameter(torch.zeros(self.pkm_base**2, dtype=dtype, device=device))
         
     def forward(self, x):
-        x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
-        y = (x1[..., :, None] + x2[..., None, :]).reshape(
-            *x.shape[:-1], self.pkm_base**2
-        )[..., : self.num_latents]
+        xs = self._weight(x)
+        x1, x2 = xs[..., :self.pkm_base], xs[..., self.pkm_base:]
+        y = (x1[..., :, None] + x2[..., None, :]).flatten(-2)
         if self.cfg.pkm_bias:
             y += self.bias
+        y = y[..., : self.num_latents]
         return y
 
     @torch.compile(mode="max-autotune")
     def topk(self, x, k: int):
+        if not self.cfg.topk_separate:
+            x = self.forward(x)
+            return x.topk(k, dim=-1)
         orig_batch_size = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
         x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
-        if not self.cfg.topk_separate:
-            x = (x1[:, :, None] + x2[:, None, :]).view(-1, self.pkm_base**2)
-            if self.cfg.pkm_bias:
-                x += self.bias
-            return x.topk(k, dim=-1)
         k1, k2 = k, k
         w1, i1 = x1.topk(k1, dim=1)
         w2, i2 = x2.topk(k2, dim=1)
@@ -95,6 +94,7 @@ class PKMLinear(nn.Module):
         if self.cfg.pkm_bias:
             w = w + self.bias[i]
         w = w.view(-1, k1 * k2)
+        w[..., self.num_latents:] = -math.inf
         w, i = w.topk(k, dim=-1)
         i1 = torch.gather(i1, 1, i // k2)
         i2 = torch.gather(i2, 1, i % k2)
@@ -126,10 +126,21 @@ class Sae(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
         self.device = device
         self.dtype = dtype
+        
+        self.W_skip = nn.Parameter(
+            torch.zeros(d_in, d_in, device=device, dtype=dtype)
+        ) if cfg.skip_connection else None
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+        if cfg.monet:
+            self.monet = Monet(cfg.monet_config).to(device=device, dtype=dtype)
+            self.num_latents = cfg.monet_config.moe_experts ** 2
+            return
+        
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
         if cfg.encoder_halut:
             from halutmatmul.modules import HalutLinear
             self.encoder = HalutLinear(d_in, self.num_latents, device=device, dtype=dtype)
@@ -148,12 +159,6 @@ class Sae(nn.Module):
         self.W_dec = nn.Parameter(self.encoder.weight.clone()) if decoder else None
         if decoder and self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
-
-        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
-
-        self.W_skip = nn.Parameter(
-            torch.zeros(d_in, d_in, device=device, dtype=dtype)
-        ) if cfg.skip_connection else None
 
     @staticmethod
     def load_many(
@@ -254,6 +259,10 @@ class Sae(nn.Module):
     def pre_acts(self, x: Tensor) -> Tensor:
         # Remove decoder bias as per Anthropic
         sae_in = x.to(self.dtype) - self.b_dec
+        if self.cfg.monet:
+            og_shape = sae_in.shape
+            sae_in = sae_in.flatten(0, -2)
+            return self.monet.encode(sae_in).reshape(*og_shape[:-1], -1)
         out = self.encoder(sae_in)
 
         return nn.functional.relu(out)
@@ -264,6 +273,8 @@ class Sae(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
+        if self.cfg.monet:
+            return EncoderOutput(self.pre_acts(x), torch.arange(self.num_latents, device=x.device))
         if self.cfg.encoder_pkm:
             return self.encoder.topk(x, self.cfg.k)
         return self.select_topk(self.pre_acts(x))
@@ -284,15 +295,22 @@ class Sae(nn.Module):
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
+            
+            
         pre_acts = self.pre_acts(x)
 
         # If we aren't given a distinct target, we're autoencoding
         if y is None:
             y = x
 
-        # Decode
-        top_acts, top_indices = self.select_topk(pre_acts)
-        sae_out = self.decode(top_acts, top_indices)
+        if self.cfg.monet:
+            sae_out = self.monet(x.to(self.dtype) - self.b_dec)
+            top_acts = pre_acts
+            top_indices = torch.arange(self.num_latents, device=x.device).broadcast_to(*top_acts.shape)
+        else:
+            # Decode
+            top_acts, top_indices = self.select_topk(pre_acts)
+            sae_out = self.decode(top_acts, top_indices)
         if self.W_skip is not None:
             sae_out += x.to(self.dtype) @ self.W_skip.mT
 
@@ -347,6 +365,9 @@ class Sae(nn.Module):
 
     @torch.no_grad()
     def set_decoder_norm_to_unit_norm(self):
+        if self.cfg.monet:
+            return
+
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
         eps = torch.finfo(self.W_dec.dtype).eps
@@ -355,6 +376,9 @@ class Sae(nn.Module):
 
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):
+        if self.cfg.monet:
+            return
+
         assert self.W_dec is not None, "Decoder weight was not initialized."
         assert self.W_dec.grad is not None  # keep pyright happy
 

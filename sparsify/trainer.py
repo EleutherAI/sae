@@ -27,6 +27,9 @@ class SaeTrainer:
         dataset: HfDataset | MemmapDataset,
         model: PreTrainedModel,
     ):
+        if cfg.sae.monet:
+            cfg.sae.monet_config.hidden_size = model.config.hidden_size
+        
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
@@ -84,7 +87,7 @@ class SaeTrainer:
 
         # Re-initialize the decoder for transcoder training. By default the Sae class
         # initializes the decoder with the transpose of the encoder.
-        if cfg.transcode:
+        if cfg.transcode and not cfg.sae.monet:
             for sae in self.saes.values():
                 assert sae.W_dec is not None
                 sae.W_dec.data.zero_()
