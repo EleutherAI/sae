@@ -7,12 +7,13 @@ from dataclasses import dataclass
 
 @dataclass
 class MonetConfig:
-    moe_heads: int = 4
-    moe_experts: int = 32
-    moe_dim: int = 128
-    moe_topk: int = 4
+    moe_heads: int = 6
+    moe_experts: int = 512
+    moe_dim: int = 12
+    moe_topk: int = 8
     hidden_size: int = 1024
     hidden_act: str = "relu2"
+    exact_topk: bool = True
 
 
 class MonetRouter(nn.Module):
@@ -27,17 +28,24 @@ class MonetRouter(nn.Module):
         self.norm2 = nn.LayerNorm(config.moe_heads, bias=False)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # b, moe_heads, moe_experts
         g1z = self.w1(x).unflatten(-1, (self.config.moe_heads, -1)).float()
         g2z = self.w2(x).unflatten(-1, (self.config.moe_heads, -1)).float()
 
+        # (b moe_experts), moe_heads
         g1n = self.norm1(g1z.transpose(-1, -2).flatten(0, -2))
         g2n = self.norm2(g2z.transpose(-1, -2).flatten(0, -2))
+        # b, moe_experts, moe_heads -> b, moe_heads, moe_experts
         g1n = g1n.view(g1z.size(0), g1z.size(2), -1).transpose(-1, -2)
         g2n = g2n.view(g2z.size(0), g2z.size(2), -1).transpose(-1, -2)
 
-        sigma = float(norm.ppf(1 - self.config.moe_topk / self.config.moe_experts))
-        g1s = g1n.amax(-1, keepdim=True).clamp_max_(sigma)
-        g2s = g2n.amax(-1, keepdim=True).clamp_max_(sigma)
+        if self.config.exact_topk:
+            g1s = g1n.topk(self.config.moe_topk, dim=-1).values.amin(-1, keepdim=True)
+            g2s = g2n.topk(self.config.moe_topk, dim=-1).values.amin(-1, keepdim=True)
+        else:
+            sigma = float(norm.ppf(1 - self.config.moe_topk / self.config.moe_experts))
+            g1s = g1n.amax(-1, keepdim=True).clamp_max_(sigma)
+            g2s = g2n.amax(-1, keepdim=True).clamp_max_(sigma)
 
         g1 = nn.functional.softmax(torch.where(g1n >= g1s, g1z, -1e10), dim=-1)
         g2 = nn.functional.softmax(torch.where(g2n >= g2s, g2z, -1e10), dim=-1)

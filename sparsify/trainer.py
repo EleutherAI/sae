@@ -213,6 +213,7 @@ class SaeTrainer:
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
+        avg_sparsity = defaultdict(float)
 
         input_dict: dict[str, Tensor] = {}
         output_dict: dict[str, Tensor] = {}
@@ -312,6 +313,10 @@ class SaeTrainer:
                     avg_fvu[name] += float(
                         self.maybe_all_reduce(out.fvu.detach()) / denom
                     )
+                    if self.cfg.sae.monet:
+                        avg_sparsity[name] += float(
+                            self.maybe_all_reduce((out.latent_acts > 1e-2).float().sum(-1).mean().detach()) / denom
+                        )
                     if self.cfg.auxk_alpha > 0:
                         avg_auxk_loss[name] += float(
                             self.maybe_all_reduce(out.auxk_loss.detach()) / denom
@@ -382,6 +387,8 @@ class SaeTrainer:
                                 ).item(),
                             }
                         )
+                        if self.cfg.sae.monet:
+                            info[f"sparsity/{name}"] = avg_sparsity[name]
                         if self.cfg.auxk_alpha > 0:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
@@ -389,6 +396,7 @@ class SaeTrainer:
 
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
+                    avg_sparsity.clear()
                     avg_multi_topk_fvu.clear()
 
                     if self.cfg.distribute_modules:

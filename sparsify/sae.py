@@ -262,7 +262,8 @@ class Sae(nn.Module):
         if self.cfg.monet:
             og_shape = sae_in.shape
             sae_in = sae_in.flatten(0, -2)
-            return self.monet.encode(sae_in).reshape(*og_shape[:-1], -1)
+            codes = self.monet.encode(sae_in).reshape(*og_shape[:-1], -1)
+            return codes
         out = self.encoder(sae_in)
 
         return nn.functional.relu(out)
