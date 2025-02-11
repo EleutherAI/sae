@@ -38,7 +38,7 @@ class SaeConfig(Serializable):
     topk_separate: bool = True
     """Faster top-k for PKM by separating the top-k operation."""
 
-    pkm_bias: bool = False
+    pkm_bias: bool = True
     """Non-decomposed bias for PKM."""
     
     pkm_init_scale: float = 1.0
