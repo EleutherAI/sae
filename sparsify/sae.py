@@ -68,6 +68,7 @@ class PKMLinear(nn.Module):
         if cfg.pkm_bias:
             self.bias = nn.Parameter(torch.zeros(self.pkm_base**2, dtype=dtype, device=device))
 
+    @torch.compile(mode="max-autotune")
     def forward(self, x):
         xs = self._weight(x)
         x1, x2 = xs[..., :self.pkm_base], xs[..., self.pkm_base:]
@@ -84,17 +85,20 @@ class PKMLinear(nn.Module):
             return x.topk(k, dim=-1)
         orig_batch_size = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
-        x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
+        # x1, x2 = torch.chunk(self._weight(x), 2, dim=-1)
+        xs = self._weight(x)
+        x1, x2 = xs[..., :self.pkm_base], xs[..., self.pkm_base:]
         k1, k2 = k, k
         w1, i1 = x1.topk(k1, dim=1)
         w2, i2 = x2.topk(k2, dim=1)
-        w = w1[:, :, None] + w2[:, None, :]
+        w = torch.nn.functional.relu(w1[:, :, None] + w2[:, None, :]).clone()
         i = i1[:, :, None] * self.pkm_base + i2[:, None, :]
+        mask = i >= self.num_latents
+        w[mask] = -1
         if self.cfg.pkm_bias:
             w = w + self.bias[i]
         w = w.view(-1, k1 * k2)
-        w[..., self.num_latents:] = -math.inf
-        w, i = w.topk(k, dim=-1)
+        w, i = w.topk(k, dim=-1, sorted=False)
         i1 = torch.gather(i1, 1, i // k2)
         i2 = torch.gather(i2, 1, i % k2)
         i = i1 * self.pkm_base + i2
@@ -297,23 +301,27 @@ class Sae(nn.Module):
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
 
-
-        pre_acts = self.pre_acts(x)
-
         # If we aren't given a distinct target, we're autoencoding
         if y is None:
             y = x
 
         if self.cfg.monet:
-            sae_out = self.monet(x.to(self.dtype) - self.b_dec)
+            pre_acts = self.pre_acts(x)
             top_acts = pre_acts
             top_indices = torch.arange(self.num_latents, device=x.device).broadcast_to(*top_acts.shape)
+            sae_out = self.monet(x.to(self.dtype) - self.b_dec)
         else:
-            # Decode
-            top_acts, top_indices = self.select_topk(pre_acts)
+            if self.cfg.topk_separate:
+                top_acts, top_indices = self.encode(x - self.b_dec)
+            else:
+                pre_acts = self.pre_acts(x)
+                # Decode
+                top_acts, top_indices = self.select_topk(pre_acts)
             sae_out = self.decode(top_acts, top_indices)
+            
         if self.W_skip is not None:
             sae_out += x.to(self.dtype) @ self.W_skip.mT
+        # del pre_acts
 
         # Compute the residual
         e = sae_out - y

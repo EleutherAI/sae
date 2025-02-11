@@ -238,6 +238,8 @@ class SaeTrainer:
                 input_dict[name] = inputs.flatten(0, 1)
 
         for batch in dl:
+            torch.compiler.cudagraph_mark_step_begin()
+            
             input_dict.clear()
             output_dict.clear()
 

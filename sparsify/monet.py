@@ -1,5 +1,4 @@
 from transformers.activations import ACT2FN
-from scipy.stats import norm
 from torch import nn
 import torch
 from dataclasses import dataclass
@@ -28,6 +27,8 @@ class MonetRouter(nn.Module):
         self.norm2 = nn.LayerNorm(config.moe_heads, bias=False)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from scipy.stats import norm
+
         # b, moe_heads, moe_experts
         g1z = self.w1(x).unflatten(-1, (self.config.moe_heads, -1)).float()
         g2z = self.w2(x).unflatten(-1, (self.config.moe_heads, -1)).float()
