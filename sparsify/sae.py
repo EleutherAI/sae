@@ -65,9 +65,11 @@ class Sae(nn.Module):
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
-        self.W_skip = nn.Parameter(
-            torch.zeros(d_in, d_in, device=device, dtype=dtype)
-        ) if cfg.skip_connection else None
+        self.W_skip = (
+            nn.Parameter(torch.zeros(d_in, d_in, device=device, dtype=dtype))
+            if cfg.skip_connection
+            else None
+        )
 
     @staticmethod
     def load_many(
@@ -180,9 +182,22 @@ class Sae(nn.Module):
 
         return nn.functional.relu(out)
 
-    def select_topk(self, latents: Tensor) -> EncoderOutput:
+    def select_topk(self, z: Tensor) -> EncoderOutput:
         """Select the top-k latents."""
-        return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
+
+        # Use GroupMax activation to get the k "top" latents
+        if self.cfg.activation == "groupmax":
+            values, indices = z.unflatten(-1, (self.cfg.k, -1)).max(dim=-1)
+
+            # torch.max gives us indices into each group, but we want indices into the
+            # flattened tensor. Add the offsets to get the correct indices.
+            offsets = torch.arange(
+                0, self.num_latents, self.num_latents // self.cfg.k, device=z.device
+            )
+            indices = offsets + indices
+            return EncoderOutput(values, indices)
+
+        return EncoderOutput(*z.topk(self.cfg.k, sorted=False))
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""

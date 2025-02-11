@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 from simple_parsing import Serializable, list_field
 
@@ -8,6 +9,8 @@ class SaeConfig(Serializable):
     """
     Configuration for training a sparse autoencoder on a language model.
     """
+
+    activation: Literal["groupmax", "topk"] = "topk"
 
     expansion_factor: int = 32
     """Multiple of the input dimension to use as the SAE dimension."""
