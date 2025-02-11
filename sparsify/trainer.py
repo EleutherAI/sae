@@ -1,8 +1,8 @@
+import math
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from typing import Sized
-import math
 
 import torch
 import torch.distributed as dist
@@ -13,14 +13,45 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import (
-    PreTrainedModel, get_linear_schedule_with_warmup
-)
+from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
 from .sae import Sae
 from .utils import get_layer_list, resolve_widths, set_submodule
+
+
+def gini_coefficient(x: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the Gini coefficient for a 1D non-negative tensor.
+
+    Args:
+        x (torch.Tensor): A 1D tensor containing non-negative values.
+
+    Returns:
+        torch.Tensor: A scalar tensor containing the Gini coefficient.
+    """
+    assert torch.all(x >= 0)
+
+    # Ensure x is 1D
+    if x.dim() != 1:
+        raise ValueError("Input must be a 1D tensor.")
+
+    # Sort the tensor
+    x_sorted, _ = torch.sort(x)
+    n = x.numel()
+
+    # Handle the edge case of all zeros or empty tensor
+    total = x_sorted.sum()
+
+    # Create an index tensor [1, 2, ..., n]
+    indices = torch.arange(1, n + 1, dtype=x.dtype, device=x.device)
+
+    # Compute Gini using the formula:
+    # G = (2 * sum(i * x_i_sorted) / (n * sum(x_i))) - (n+1)/n
+    gini = (2.0 * (indices * x_sorted).sum() / (n * total)) - (n + 1.0) / n
+
+    return gini
 
 
 class SaeTrainer:
@@ -45,7 +76,7 @@ class SaeTrainer:
             # Natural sort to impose a consistent order
             cfg.hookpoints = natsorted(raw_hookpoints)
             if cfg.layer_stride > 1:
-                cfg.hookpoints = cfg.hookpoints[::cfg.layer_stride]
+                cfg.hookpoints = cfg.hookpoints[:: cfg.layer_stride]
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
@@ -55,12 +86,6 @@ class SaeTrainer:
             # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
-        
-        # If doing end-to-end, then we don't actually want to run the modules that
-        # we're replacing
-        if cfg.end_to_end:
-            for hook in cfg.hookpoints:
-                set_submodule(model.base_model, hook, nn.Identity())
 
         self.cfg = cfg
         self.dataset = dataset
@@ -99,7 +124,11 @@ class SaeTrainer:
         if cfg.transcode:
             for sae in self.saes.values():
                 assert sae.W_dec is not None
-                nn.init.kaiming_normal_(sae.W_dec.data)
+                # nn.init.orthogonal_(sae.encoder.weight.data)
+                # sae.W_dec.data = sae.encoder.weight.data.clone()
+                nn.init.orthogonal_(sae.W_dec.data)
+                # sae.W_dec.data.zero_()
+                # nn.init.kaiming_normal_(sae.W_dec.data)
 
         pgs = [
             {
@@ -109,6 +138,7 @@ class SaeTrainer:
             }
             for sae in self.saes.values()
         ]
+
         # Dedup the learning rates we're using, sort them, round to 2 decimal places
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
         print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
@@ -130,7 +160,7 @@ class SaeTrainer:
         }
         self.optimizer = Adam(pgs)
         self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+            self.optimizer, 0, num_examples // cfg.batch_size  # cfg.lr_warmup_steps
         )
 
     def load_state(self, path: str):
@@ -151,10 +181,8 @@ class SaeTrainer:
         lr_state = torch.load(
             f"{path}/lr_scheduler.pt", map_location=device, weights_only=True
         )
-        opt_state = torch.load(
-            f"{path}/optimizer.pt", map_location=device, weights_only=True
-        )
-        self.optimizer.load_state_dict(opt_state)
+        torch.load(f"{path}/optimizer.pt", map_location=device, weights_only=True)
+        # self.optimizer.load_state_dict(opt_state)
         self.lr_scheduler.load_state_dict(lr_state)
 
         for name, sae in self.saes.items():
@@ -219,6 +247,10 @@ class SaeTrainer:
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
             for name, sae in self.saes.items()
         }
+        fire_counts = {
+            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
+            for name, sae in self.saes.items()
+        }
 
         acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
         denom = acc_steps * self.cfg.wandb_log_frequency
@@ -229,6 +261,20 @@ class SaeTrainer:
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
         aux_loss = 0.0
+
+        if self.cfg.end_to_end:
+            batch = next(iter(dl))
+            x = batch["input_ids"].to(device)
+
+            clean_loss = self.model(x, labels=x).loss
+            self.maybe_all_reduce(clean_loss)
+            if rank_zero:
+                print(f"Initial CE loss: {clean_loss.item():.4f}")
+
+            # If doing end-to-end, then we don't actually want to run the modules that
+            # we're replacing
+            for point in self.cfg.hookpoints:
+                set_submodule(self.model.base_model, point, nn.Identity())
 
         name_to_module = {
             name: self.model.base_model.get_submodule(name)
@@ -259,11 +305,18 @@ class SaeTrainer:
             inputs = inputs.flatten(0, 1) if self.cfg.transcode else outputs
             raw = self.saes[name]
 
-            # On the first iteration, initialize the decoder bias
+            # On the first iteration, initialize the encoder and decoder biases
             if self.global_step == 0:
+                # Ensure the preactivations are centered at initialization
+                # This is mathematically equivalent to Anthropic's proposal of
+                # subtracting the decoder bias
+                mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
+                mean_image = -mean @ raw.encoder.weight.data.T
+                raw.encoder.bias.data = mean_image
+
                 mean = self.maybe_all_reduce(outputs.mean(0))
                 raw.b_dec.data = mean.to(raw.dtype)
-            
+
             # Make sure the W_dec is still unit-norm if we're autoencoding
             if raw.cfg.normalize_decoder and not self.cfg.transcode:
                 raw.set_decoder_norm_to_unit_norm()
@@ -273,15 +326,12 @@ class SaeTrainer:
                 x=inputs,
                 y=outputs,
                 dead_mask=(
-                    self.num_tokens_since_fired[name]
-                    > self.cfg.dead_feature_threshold
+                    self.num_tokens_since_fired[name] > self.cfg.dead_feature_threshold
                     if self.cfg.auxk_alpha > 0
                     else None
                 ),
             )
-            avg_fvu[name] += float(
-                self.maybe_all_reduce(out.fvu.detach()) / denom
-            )
+            avg_fvu[name] += float(self.maybe_all_reduce(out.fvu.detach()) / denom)
             if self.cfg.auxk_alpha > 0:
                 avg_auxk_loss[name] += float(
                     self.maybe_all_reduce(out.auxk_loss.detach()) / denom
@@ -291,26 +341,30 @@ class SaeTrainer:
                     self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
                 )
 
+            counts = fire_counts[name]
+            counts += torch.bincount(
+                out.latent_indices.flatten(), minlength=len(counts)
+            )
+            self.maybe_all_reduce(counts, "sum")
+
             # Update the did_fire mask
             did_fire[name][out.latent_indices.flatten()] = True
             self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
 
             if self.cfg.end_to_end:
-                #aux_loss += loss
-
                 # Replace the normal output with the SAE output
                 output = out.sae_out.reshape(out_shape).type_as(outputs)
                 return (output, *aux_out) if aux_out is not None else output
 
             # Do a "local" backward pass if we're not training end-to-end
             loss = (
-                out.fvu
-                + self.cfg.auxk_alpha * out.auxk_loss
-                + out.multi_topk_fvu / 8
+                out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
             )
             loss.div(acc_steps).backward()
 
         for batch in dl:
+            x = batch["input_ids"].to(device)
+
             if not maybe_wrapped:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
                 # after we set the decoder bias, otherwise DDP will not register
@@ -329,7 +383,7 @@ class SaeTrainer:
                 )
 
             # Bookkeeping for dead feature detection
-            N = batch["input_ids"].numel()
+            N = x.numel()
             num_tokens_in_step += N
 
             # Forward pass on the model to get the next batch of activations
@@ -338,7 +392,6 @@ class SaeTrainer:
             ]
             try:
                 ce_loss = None
-                x = batch["input_ids"].to(device)
 
                 # If we're training end-to-end, we need to pass the labels to the model
                 # and do a backward pass through the entire model.
@@ -348,7 +401,8 @@ class SaeTrainer:
                     alpha = self.cfg.local_loss_weight
                     loss = (
                         # Normalize the CE loss by log(vocab_size) to compare with FVU
-                        (1 - alpha) * ce_loss / math.log(self.model.config.vocab_size) +
+                        (1 - alpha) * ce_loss / math.log(self.model.config.vocab_size)
+                        +
                         # Normalize the aux loss by the number of SAEs
                         alpha * aux_loss / len(self.saes)
                     )
@@ -360,7 +414,7 @@ class SaeTrainer:
                 for handle in handles:
                     handle.remove()
 
-            #if self.cfg.distribute_modules:
+            # if self.cfg.distribute_modules:
             #    input_dict = self.scatter_hiddens(input_dict)
             #    output_dict = self.scatter_hiddens(output_dict)
 
@@ -407,8 +461,12 @@ class SaeTrainer:
                                 f"dead_pct/{name}": mask.mean(
                                     dtype=torch.float32
                                 ).item(),
+                                f"gini/{name}": gini_coefficient(
+                                    fire_counts[name]
+                                ).item(),
                             }
                         )
+                        fire_counts[name].zero_()
                         if self.cfg.auxk_alpha > 0:
                             info[f"auxk/{name}"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
