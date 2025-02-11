@@ -15,7 +15,6 @@ from torch import Tensor, nn
 from .config import SaeConfig
 from .utils import decoder_impl
 from .xformers_decoder import xformers_embedding_bag
-from .monet import Monet, MonetConfig
 
 
 class EncoderOutput(NamedTuple):
@@ -68,7 +67,7 @@ class PKMLinear(nn.Module):
         self._scale = nn.Parameter(torch.zeros(1, dtype=dtype, device=device))
         if cfg.pkm_bias:
             self.bias = nn.Parameter(torch.zeros(self.pkm_base**2, dtype=dtype, device=device))
-        
+
     def forward(self, x):
         xs = self._weight(x)
         x1, x2 = xs[..., :self.pkm_base], xs[..., self.pkm_base:]
@@ -129,17 +128,18 @@ class Sae(nn.Module):
 
         self.device = device
         self.dtype = dtype
-        
+
         self.W_skip = nn.Parameter(
             torch.zeros(d_in, d_in, device=device, dtype=dtype)
         ) if cfg.skip_connection else None
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
         if cfg.monet:
+            from .monet import Monet
             self.monet = Monet(cfg.monet_config).to(device=device, dtype=dtype)
             self.num_latents = cfg.monet_config.moe_experts ** 2
             return
-        
+
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
         if cfg.encoder_halut:
             from halutmatmul.modules import HalutLinear
@@ -296,8 +296,8 @@ class Sae(nn.Module):
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
-            
-            
+
+
         pre_acts = self.pre_acts(x)
 
         # If we aren't given a distinct target, we're autoencoding
