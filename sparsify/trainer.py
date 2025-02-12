@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+from transformers import PreTrainedModel, get_constant_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
@@ -111,8 +111,8 @@ class Trainer:
             for name, sae in self.saes.items()
         }
         self.optimizer = Adam(pgs)
-        self.lr_scheduler = get_linear_schedule_with_warmup(
-            self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
+        self.lr_scheduler = get_constant_schedule_with_warmup(
+            self.optimizer, num_warmup_steps=cfg.lr_warmup_steps
         )
 
     def load_state(self, path: str):
@@ -397,12 +397,12 @@ class Trainer:
                         wandb.log(info, step=step)
 
                 if (step + 1) % self.cfg.save_every == 0:
-                    self.save()
+                    self.save(step + 1)
 
             self.global_step += 1
             pbar.update()
 
-        self.save()
+        self.save(step + 1)
         pbar.close()
 
     def local_hookpoints(self) -> list[str]:
@@ -486,7 +486,7 @@ class Trainer:
         # Return a list of results, one for each layer
         return {hook: buffer[:, i] for i, hook in enumerate(local_hooks)}
 
-    def save(self):
+    def save(self, step: int):
         """Save the SAEs to disk."""
 
         path = self.cfg.run_name or "sae-ckpts"
@@ -498,7 +498,7 @@ class Trainer:
             for name, sae in self.saes.items():
                 assert isinstance(sae, SparseCoder)
 
-                sae.save_to_disk(f"{path}/{name}")
+                sae.save_to_disk(f"{path}/{step}/{name}")
 
             torch.save({"num_tokens_since_fired": self.num_tokens_since_fired}, f"{path}/rank_{dist.get_rank()}_state.pt")
 
