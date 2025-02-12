@@ -77,9 +77,7 @@ gpt = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
 )
 
-cfg = TrainConfig(
-    SaeConfig(gpt.config.hidden_size), batch_size=16
-)
+cfg = TrainConfig(SaeConfig(), batch_size=16)
 trainer = Trainer(cfg, tokenized, gpt)
 
 trainer.fit()
