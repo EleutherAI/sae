@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
+from typing import Literal
 
 from simple_parsing import Serializable, list_field
 
@@ -9,6 +10,9 @@ class SparseCoderConfig(Serializable):
     """
     Configuration for training a sparse coder on a language model.
     """
+
+    activation: Literal["groupmax", "topk"] = "topk"
+    """Activation function to use."""
 
     expansion_factor: int = 32
     """Multiple of the input dimension to use as the SAE dimension."""
@@ -73,9 +77,6 @@ class TrainConfig(Serializable):
 
     layer_stride: int = 1
     """Stride between layers to train sparse coders on."""
-
-    transcode: bool = False
-    """Predict the output of a module given its input."""
 
     distribute_modules: bool = False
     """Store one copy of each sparse coder, instead of copying them across devices."""
