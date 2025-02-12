@@ -12,7 +12,7 @@ from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from .data import MemmapDataset, chunk_and_tokenize
-from .trainer import SaeTrainer, TrainConfig
+from .trainer import TrainConfig, Trainer
 
 
 @dataclass
@@ -140,28 +140,30 @@ def run():
 
         # Increase the default timeout in order to account for slow downloads
         # and data preprocessing on the main rank
-        dist.init_process_group("nccl", timeout=timedelta(weeks=1))
+        dist.init_process_group(
+            "nccl", device_id=torch.device(rank), timeout=timedelta(weeks=1)
+        )
 
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
 
     args = parse(RunConfig)
 
-    # Awkward hack to prevent other ranks from duplicating data preprocessing
-    if not ddp or rank == 0:
-        model, dataset = load_artifacts(args, rank)
-    if ddp:
-        dist.barrier()
-        if rank != 0:
-            model, dataset = load_artifacts(args, rank)
-        dataset = dataset.shard(dist.get_world_size(), rank)
-
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
+        # Awkward hack to prevent other ranks from duplicating data preprocessing
+        if not ddp or rank == 0:
+            model, dataset = load_artifacts(args, rank)
+        if ddp:
+            dist.barrier()
+            if rank != 0:
+                model, dataset = load_artifacts(args, rank)
+            dataset = dataset.shard(dist.get_world_size(), rank)
+
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = SaeTrainer(args, dataset, model)
+        trainer = Trainer(args, dataset, model)
         if args.resume:
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:

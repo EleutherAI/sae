@@ -10,7 +10,7 @@ from natsort import natsorted
 from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
 
-from .config import SaeConfig
+from .config import SparseCoderConfig
 from .utils import decoder_impl
 
 
@@ -41,11 +41,11 @@ class ForwardOutput(NamedTuple):
     """Multi-TopK FVU, if applicable."""
 
 
-class Sae(nn.Module):
+class SparseCoder(nn.Module):
     def __init__(
         self,
         d_in: int,
-        cfg: SaeConfig,
+        cfg: SparseCoderConfig,
         device: str | torch.device = "cpu",
         dtype: torch.dtype | None = None,
         *,
@@ -59,15 +59,25 @@ class Sae(nn.Module):
         self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
 
-        self.W_dec = nn.Parameter(self.encoder.weight.data.clone()) if decoder else None
-        if decoder and self.cfg.normalize_decoder:
-            self.set_decoder_norm_to_unit_norm()
+        if decoder:
+            # Transcoder initialization: use zeros
+            if cfg.transcode:
+                self.W_dec = nn.Parameter(torch.zeros_like(self.encoder.weight.data))
+
+            # Sparse autoencoder initialization: use the transpose of encoder weights
+            else:
+                self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
+                if self.cfg.normalize_decoder:
+                    self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
-
-        self.W_skip = nn.Parameter(
-            torch.zeros(d_in, d_in, device=device, dtype=dtype)
-        ) if cfg.skip_connection else None
+        self.W_skip = (
+            nn.Parameter(torch.zeros(d_in, d_in, device=device, dtype=dtype))
+            if cfg.skip_connection
+            else None
+        )
 
     @staticmethod
     def load_many(
@@ -78,8 +88,8 @@ class Sae(nn.Module):
         *,
         decoder: bool = True,
         pattern: str | None = None,
-    ) -> dict[str, "Sae"]:
-        """Load SAEs for multiple hookpoints on a single model and dataset."""
+    ) -> dict[str, "SparseCoder"]:
+        """Load sparse coders for multiple hookpoints on a single model and dataset."""
         pattern = pattern + "/*" if pattern is not None else None
         if local:
             repo_path = Path(name)
@@ -88,7 +98,7 @@ class Sae(nn.Module):
 
         if layers is not None:
             return {
-                layer: Sae.load_from_disk(
+                layer: SparseCoder.load_from_disk(
                     repo_path / layer, device=device, decoder=decoder
                 )
                 for layer in natsorted(layers)
@@ -99,7 +109,7 @@ class Sae(nn.Module):
             if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
         ]
         return {
-            f.name: Sae.load_from_disk(f, device=device, decoder=decoder)
+            f.name: SparseCoder.load_from_disk(f, device=device, decoder=decoder)
             for f in natsorted(files, key=lambda f: f.name)
         }
 
@@ -110,7 +120,7 @@ class Sae(nn.Module):
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
-    ) -> "Sae":
+    ) -> "SparseCoder":
         # Download from the HuggingFace Hub
         repo_path = Path(
             snapshot_download(
@@ -125,7 +135,7 @@ class Sae(nn.Module):
         elif not repo_path.joinpath("cfg.json").exists():
             raise FileNotFoundError("No config file found; try specifying a layer.")
 
-        return Sae.load_from_disk(repo_path, device=device, decoder=decoder)
+        return SparseCoder.load_from_disk(repo_path, device=device, decoder=decoder)
 
     @staticmethod
     def load_from_disk(
@@ -133,15 +143,15 @@ class Sae(nn.Module):
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
-    ) -> "Sae":
+    ) -> "SparseCoder":
         path = Path(path)
 
         with open(path / "cfg.json", "r") as f:
             cfg_dict = json.load(f)
             d_in = cfg_dict.pop("d_in")
-            cfg = SaeConfig.from_dict(cfg_dict, drop_extra_fields=True)
+            cfg = SparseCoderConfig.from_dict(cfg_dict, drop_extra_fields=True)
 
-        sae = Sae(d_in, cfg, device=device, decoder=decoder)
+        sae = SparseCoder(d_in, cfg, device=device, decoder=decoder)
         load_model(
             model=sae,
             filename=str(path / "sae.safetensors"),
@@ -174,15 +184,34 @@ class Sae(nn.Module):
         return self.encoder.weight.dtype
 
     def pre_acts(self, x: Tensor) -> Tensor:
-        # Remove decoder bias as per Anthropic
-        sae_in = x.to(self.dtype) - self.b_dec
-        out = self.encoder(sae_in)
+        sae_in = x.to(self.dtype)
 
+        # Remove decoder bias as per Anthropic if we're autoencoding. This doesn't
+        # really make sense for transcoders because the input and output spaces are
+        # different.
+        if not self.cfg.transcode:
+            sae_in -= self.b_dec
+
+        out = self.encoder(sae_in)
         return nn.functional.relu(out)
 
-    def select_topk(self, latents: Tensor) -> EncoderOutput:
+    def select_topk(self, z: Tensor) -> EncoderOutput:
         """Select the top-k latents."""
-        return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
+
+        # Use GroupMax activation to get the k "top" latents
+        if self.cfg.activation == "groupmax":
+            values, indices = z.unflatten(-1, (self.cfg.k, -1)).max(dim=-1)
+
+            # torch.max gives us indices into each group, but we want indices into the
+            # flattened tensor. Add the offsets to get the correct indices.
+            offsets = torch.arange(
+                0, self.num_latents, self.num_latents // self.cfg.k, device=z.device
+            )
+            indices = offsets + indices
+            return EncoderOutput(values, indices)
+
+        # Use TopK activation
+        return EncoderOutput(*z.topk(self.cfg.k, sorted=False))
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
@@ -285,3 +314,7 @@ class Sae(nn.Module):
             self.W_dec.data,
             "d_sae, d_sae d_in -> d_sae d_in",
         )
+
+
+# Allow for alternate naming conventions
+Sae = SparseCoder
