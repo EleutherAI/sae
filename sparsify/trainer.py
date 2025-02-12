@@ -16,7 +16,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
-from .sae import SparseCoder
+from .sparse_coder import SparseCoder
 from .utils import get_layer_list, resolve_widths
 
 
