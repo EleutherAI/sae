@@ -1,5 +1,5 @@
-from .config import SaeConfig, TrainConfig
-from .sae import Sae
-from .trainer import SaeTrainer
+from .config import SparseCoderConfig, TrainConfig
+from .sae import SparseCoder
+from .trainer import Trainer
 
-__all__ = ["Sae", "SaeConfig", "SaeTrainer", "TrainConfig"]
+__all__ = ["SparseCoder", "SparseCoderConfig", "Trainer", "TrainConfig"]

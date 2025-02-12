@@ -42,13 +42,14 @@ with torch.inference_mode():
 # Do stuff with the latent activations
 ```
 
-## Training SAEs
+## Training SAEs and transcoders
 
 To train SAEs from the command line, you can use the following command:
 
 ```bash
-python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample
+python -m sparsify EleutherAI/pythia-160m <optional dataset>
 ```
+By default, we use the `EleutherAI/fineweb-edu-dedup-10b` dataset for training, but you can use any dataset HuggingFace Hub
 
 The CLI supports all of the config options provided by the `TrainConfig` class. You can see them by running `python -m sparsify --help`.
 
@@ -59,14 +60,12 @@ import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from sparsify import SaeConfig, SaeTrainer, TrainConfig
+from sparsify import SaeConfig, Trainer, TrainConfig
 from sparsify.data import chunk_and_tokenize
 
-MODEL = "EleutherAI/pythia-160m"
+MODEL = "HuggingFaceTB/SmolLM2-135M"
 dataset = load_dataset(
-    "togethercomputer/RedPajama-Data-1T-Sample",
-    split="train",
-    trust_remote_code=True,
+    "EleutherAI/fineweb-edu-dedup-10b", split="train",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 tokenized = chunk_and_tokenize(dataset, tokenizer)
@@ -81,7 +80,7 @@ gpt = AutoModelForCausalLM.from_pretrained(
 cfg = TrainConfig(
     SaeConfig(gpt.config.hidden_size), batch_size=16
 )
-trainer = SaeTrainer(cfg, tokenized, gpt)
+trainer = Trainer(cfg, tokenized, gpt)
 
 trainer.fit()
 ```
@@ -99,13 +98,13 @@ python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sam
 By default, the SAEs are trained on the residual stream activations of the model. However, you can also train SAEs on the activations of any other submodule(s) by specifying custom hookpoint patterns. These patterns are like standard PyTorch module names (e.g. `h.0.ln_1`) but also allow [Unix pattern matching syntax](https://docs.python.org/3/library/fnmatch.html), including wildcards and character sets. For example, to train SAEs on the output of every attention module and the inner activations of every MLP in GPT-2, you can use the following code:
 
 ```bash
-python -m sparsify gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.*.attn" "h.*.mlp.act"
+python -m sparsify gpt2 --hookpoints "h.*.attn" "h.*.mlp.act"
 ```
 
 To restrict to the first three layers:
 
 ```bash
-python -m sparsify gpt2 togethercomputer/RedPajama-Data-1T-Sample --hookpoints "h.[012].attn" "h.[012].mlp.act"
+python -m sparsify gpt2 --hookpoints "h.[012].attn" "h.[012].mlp.act"
 ```
 
 We currently don't support fine-grained manual control over the learning rate, number of latents, or other hyperparameters on a hookpoint-by-hookpoint basis. By default, the `expansion_factor` option is used to select the appropriate number of latents for each hookpoint based on the width of that hookpoint's output. The default learning rate for each hookpoint is then set using an inverse square root scaling law based on the number of latents. If you manually set the number of latents or the learning rate, it will be applied to all hookpoints.

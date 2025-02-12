@@ -16,11 +16,11 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
-from .sae import Sae
+from .sae import SparseCoder
 from .utils import get_layer_list, resolve_widths
 
 
-class SaeTrainer:
+class Trainer:
     def __init__(
         self,
         cfg: TrainConfig,
@@ -78,16 +78,9 @@ class SaeTrainer:
 
                 # Add suffix to the name to disambiguate multiple seeds
                 name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-                self.saes[name] = Sae(
+                self.saes[name] = SparseCoder(
                     input_widths[hook], cfg.sae, device, dtype=torch.float32
                 )
-
-        # Re-initialize the decoder for transcoder training. By default the Sae class
-        # initializes the decoder with the transpose of the encoder.
-        if cfg.transcode:
-            for sae in self.saes.values():
-                assert sae.W_dec is not None
-                sae.W_dec.data.zero_()
 
         pgs = [
             {
@@ -216,7 +209,7 @@ class SaeTrainer:
         name_to_module = {
             name: self.model.get_submodule(name) for name in self.cfg.hookpoints
         }
-        maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
+        maybe_wrapped: dict[str, DDP] | dict[str, SparseCoder] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, inputs, outputs):
@@ -230,7 +223,7 @@ class SaeTrainer:
             output_dict[name] = outputs.flatten(0, 1)
 
             # Remember the inputs if we're training a transcoder
-            if self.cfg.transcode:
+            if self.cfg.sae.transcode:
                 input_dict[name] = inputs.flatten(0, 1)
 
         for batch in dl:
@@ -284,7 +277,7 @@ class SaeTrainer:
                     )
 
                 # Make sure the W_dec is still unit-norm if we're autoencoding
-                if raw.cfg.normalize_decoder and not self.cfg.transcode:
+                if raw.cfg.normalize_decoder and not self.cfg.sae.transcode:
                     raw.set_decoder_norm_to_unit_norm()
 
                 acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
@@ -329,13 +322,13 @@ class SaeTrainer:
                     did_fire[name][out.latent_indices.flatten()] = True
                     self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
 
-                # Clip gradient norm independently for each SAE
+                # Clip gradient norm independently for each sparse coder
                 torch.nn.utils.clip_grad_norm_(raw.parameters(), 1.0)
 
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
-                if self.cfg.sae.normalize_decoder and not self.cfg.transcode:
+                if self.cfg.sae.normalize_decoder and not self.cfg.sae.transcode:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
@@ -492,7 +485,7 @@ class SaeTrainer:
             print("Saving checkpoint")
 
             for name, sae in self.saes.items():
-                assert isinstance(sae, Sae)
+                assert isinstance(sae, SparseCoder)
 
                 sae.save_to_disk(f"{path}/{name}")
 
@@ -512,3 +505,7 @@ class SaeTrainer:
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():
             dist.barrier()
+
+
+# Support old name for compatibility
+SaeTrainer = Trainer

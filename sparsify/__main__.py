@@ -12,7 +12,7 @@ from simple_parsing import field, parse
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from .data import MemmapDataset, chunk_and_tokenize
-from .trainer import SaeTrainer, TrainConfig
+from .trainer import TrainConfig, Trainer
 
 
 @dataclass
@@ -161,7 +161,7 @@ def run():
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = SaeTrainer(args, dataset, model)
+        trainer = Trainer(args, dataset, model)
         if args.resume:
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:
