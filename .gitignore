@@ -163,3 +163,4 @@ checkpoints/
 wandb/
 sae-ckpts/
 /pkm_saes/
+/sae-pkm

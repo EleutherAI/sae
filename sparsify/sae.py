@@ -262,7 +262,7 @@ class Sae(nn.Module):
 
     def pre_acts(self, x: Tensor) -> Tensor:
         # Remove decoder bias as per Anthropic
-        sae_in = x.to(self.dtype) - self.b_dec
+        sae_in = x.to(self.dtype)  # - self.b_dec
         if self.cfg.monet:
             og_shape = sae_in.shape
             sae_in = sae_in.flatten(0, -2)
@@ -309,10 +309,10 @@ class Sae(nn.Module):
             pre_acts = self.pre_acts(x)
             top_acts = pre_acts
             top_indices = torch.arange(self.num_latents, device=x.device).broadcast_to(*top_acts.shape)
-            sae_out = self.monet(x.to(self.dtype) - self.b_dec)
+            sae_out = self.monet(x.to(self.dtype))  # - self.b_dec)
         else:
             if self.cfg.topk_separate:
-                top_acts, top_indices = self.encode(x - self.b_dec)
+                top_acts, top_indices = self.encode(x)  # - self.b_dec)
             else:
                 pre_acts = self.pre_acts(x)
                 # Decode
