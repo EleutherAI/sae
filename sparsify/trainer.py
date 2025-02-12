@@ -17,7 +17,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
-from .sae import Sae
+from .sae import SparseCoder
 from .utils import get_layer_list, resolve_widths, set_submodule
 
 
@@ -54,7 +54,7 @@ def gini_coefficient(x: torch.Tensor) -> torch.Tensor:
     return gini
 
 
-class SaeTrainer:
+class Trainer:
     def __init__(
         self,
         cfg: TrainConfig,
@@ -115,20 +115,9 @@ class SaeTrainer:
 
                 # Add suffix to the name to disambiguate multiple seeds
                 name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-                self.saes[name] = Sae(
+                self.saes[name] = SparseCoder(
                     input_widths[hook], cfg.sae, device, dtype=torch.float32
                 )
-
-        # Re-initialize the decoder for transcoder training. By default the Sae class
-        # initializes the decoder with the transpose of the encoder.
-        if cfg.transcode:
-            for sae in self.saes.values():
-                assert sae.W_dec is not None
-                # nn.init.orthogonal_(sae.encoder.weight.data)
-                # sae.W_dec.data = sae.encoder.weight.data.clone()
-                nn.init.orthogonal_(sae.W_dec.data)
-                # sae.W_dec.data.zero_()
-                # nn.init.kaiming_normal_(sae.W_dec.data)
 
         pgs = [
             {
@@ -280,7 +269,7 @@ class SaeTrainer:
             name: self.model.base_model.get_submodule(name)
             for name in self.cfg.hookpoints
         }
-        maybe_wrapped: dict[str, DDP] | dict[str, Sae] = {}
+        maybe_wrapped: dict[str, DDP] | dict[str, SparseCoder] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, inputs, outputs):
@@ -421,7 +410,7 @@ class SaeTrainer:
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
-                if self.cfg.sae.normalize_decoder and not self.cfg.transcode:
+                if self.cfg.sae.normalize_decoder and not self.cfg.sae.transcode:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
@@ -584,7 +573,7 @@ class SaeTrainer:
             print("Saving checkpoint")
 
             for name, sae in self.saes.items():
-                assert isinstance(sae, Sae)
+                assert isinstance(sae, SparseCoder)
 
                 sae.save_to_disk(f"{path}/{name}")
 
@@ -604,3 +593,7 @@ class SaeTrainer:
         # Barrier to ensure all ranks have saved before continuing
         if dist.is_initialized():
             dist.barrier()
+
+
+# Support old name for compatibility
+SaeTrainer = Trainer

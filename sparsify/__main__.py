@@ -18,7 +18,7 @@ from transformers import (
 )
 
 from .data import MemmapDataset, chunk_and_tokenize
-from .trainer import SaeTrainer, TrainConfig
+from .trainer import TrainConfig, Trainer
 
 
 @dataclass
@@ -148,7 +148,9 @@ def run():
 
         # Increase the default timeout in order to account for slow downloads
         # and data preprocessing on the main rank
-        dist.init_process_group("nccl", timeout=timedelta(weeks=1))
+        dist.init_process_group(
+            "nccl", device_id=torch.device(rank), timeout=timedelta(weeks=1)
+        )
 
         if rank == 0:
             print(f"Using DDP across {dist.get_world_size()} GPUs.")
@@ -169,7 +171,7 @@ def run():
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = SaeTrainer(args, dataset, model)
+        trainer = Trainer(args, dataset, model)
         if args.resume:
             trainer.load_state(args.run_name or "sae-ckpts")
         elif args.finetune:

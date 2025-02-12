@@ -1,16 +1,18 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal
 
 from simple_parsing import Serializable, list_field
 
 
 @dataclass
-class SaeConfig(Serializable):
+class SparseCoderConfig(Serializable):
     """
-    Configuration for training a sparse autoencoder on a language model.
+    Configuration for training a sparse coder on a language model.
     """
 
     activation: Literal["groupmax", "topk"] = "topk"
+    """Activation function to use."""
 
     expansion_factor: int = 32
     """Multiple of the input dimension to use as the SAE dimension."""
@@ -30,10 +32,18 @@ class SaeConfig(Serializable):
     skip_connection: bool = False
     """Include a linear skip connection."""
 
+    transcode: bool = False
+    """Whether we want to predict the output of a module given its input."""
+
+
+# Support different naming conventions for the same configuration
+SaeConfig = SparseCoderConfig
+TranscoderConfig = partial(SparseCoderConfig, transcode=True)
+
 
 @dataclass
 class TrainConfig(Serializable):
-    sae: SaeConfig
+    sae: SparseCoderConfig
 
     batch_size: int = 8
     """Batch size measured in sequences."""
@@ -45,10 +55,7 @@ class TrainConfig(Serializable):
     """Number of steps over which to accumulate gradients."""
 
     micro_acc_steps: int = 1
-    """Chunk the activations into this number of microbatches for SAE training."""
-
-    local_loss_weight: float = 0.0
-    """Weight of the local loss term for end-to-end training."""
+    """Chunk the activations into this number of microbatches for training."""
 
     lr: float | None = None
     """Base LR. If None, it is automatically chosen based on the number of latents."""
@@ -62,23 +69,20 @@ class TrainConfig(Serializable):
     """Number of tokens after which a feature is considered dead."""
 
     hookpoints: list[str] = list_field()
-    """List of hookpoints to train SAEs on."""
+    """List of hookpoints to train sparse coders on."""
 
     init_seeds: list[int] = list_field(0)
-    """List of random seeds to use for initialization. If more than one, train an SAE
-    for each seed."""
+    """List of random seeds to use for initialization. If more than one, train a sparse
+    coder for each seed."""
 
     layers: list[int] = list_field()
-    """List of layer indices to train SAEs on."""
+    """List of layer indices to train sparse coders on."""
 
     layer_stride: int = 1
-    """Stride between layers to train SAEs on."""
-
-    transcode: bool = False
-    """Predict the output of a module given its input."""
+    """Stride between layers to train sparse coders on."""
 
     distribute_modules: bool = False
-    """Store a single copy of each SAE, instead of copying them across devices."""
+    """Store one copy of each sparse coder, instead of copying them across devices."""
 
     save_every: int = 1000
     """Save SAEs every `save_every` steps."""
