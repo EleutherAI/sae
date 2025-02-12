@@ -25,6 +25,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+pythia*
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -161,3 +162,9 @@ cython_debug/
 
 checkpoints/
 wandb/
+
+
+const-warmup/
+const-warmup copy/
+sae-ckpts/
+sae-DeepSeek-R1-Distill-Qwen-1.5B-65k-const-lr

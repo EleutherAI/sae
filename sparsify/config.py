@@ -81,7 +81,7 @@ class TrainConfig(Serializable):
     distribute_modules: bool = False
     """Store one copy of each sparse coder, instead of copying them across devices."""
 
-    save_every: int = 1000
+    save_every: int = 10_000
     """Save SAEs every `save_every` steps."""
 
     log_to_wandb: bool = True
