@@ -13,7 +13,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 #%%
 from datasets import load_dataset
-ds = load_dataset("ogethercomputer/RedPajama-Data-1T-Sample", split="train")
+ds = load_dataset("togethercomputer/RedPajama-Data-1T-Sample", split="train")
 # %%
 %load_ext autoreload
 %autoreload 2
