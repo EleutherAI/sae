@@ -123,18 +123,22 @@ class Trainer:
         train_state = torch.load(
             f"{path}/state.pt", map_location=device, weights_only=True
         )
-        train_state["num_tokens_since_fired"] = {}
+        # train_state["num_tokens_since_fired"] = {}
 
-        for file in glob(f"{path}/rank_*_state.pt"):
-            rank_train_state = torch.load(file, map_location=device)
-            train_state["num_tokens_since_fired"].update(rank_train_state["num_tokens_since_fired"])
-
+        # for file in glob(f"{path}/rank_*_state.pt"):
+        #     rank_train_state = torch.load(file, map_location=device)
+        #     train_state["num_tokens_since_fired"].update(rank_train_state["num_tokens_since_fired"])
 
         self.global_step = train_state["global_step"]
-        self.num_tokens_since_fired = {
-            k: train_state["num_tokens_since_fired"][k]
-            for k in self.local_hookpoints()
-        }
+        self.num_tokens_since_fired = {}
+        for k in self.local_hookpoints():
+            self.num_tokens_since_fired[k] = next(iter(train_state["num_tokens_since_fired"]))
+
+        # self.num_tokens_since_fired = {
+        #     k: train_state["num_tokens_since_fired"][k]
+        #     for k in self.local_hookpoints()
+        # }
+
 
         print(
             f"\033[92mResuming training at step {self.global_step} from '{path}'\033[0m"
@@ -396,7 +400,7 @@ class Trainer:
                     if rank_zero:
                         wandb.log(info, step=step)
 
-                if (step + 1) % self.cfg.save_every == 0:
+                if (step + 1) % 10_000 == 0:
                     self.save(step + 1)
 
             self.global_step += 1
