@@ -182,6 +182,9 @@ class SaeTrainer:
         )
         num_model_params = sum(p.numel() for p in self.model.parameters())
         print(f"Number of SAE parameters: {num_sae_params:_}")
+        encoder_params = sum(p.numel()
+            for s in self.saes.values() for p in s.encoder.parameters())
+        print(f"Number of encoder parameters: {encoder_params:_}")
         print(f"Number of model parameters: {num_model_params:_}")
 
         num_batches = len(self.dataset) // self.cfg.batch_size

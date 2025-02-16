@@ -94,14 +94,16 @@ class PKMLinear(nn.Module):
         w = torch.nn.functional.relu(w1[:, :, None] + w2[:, None, :]).clone()
         i = i1[:, :, None] * self.pkm_base + i2[:, None, :]
         mask = i >= self.num_latents
-        w[mask] = -1
         if self.cfg.pkm_bias:
-            w = w + self.bias[i]
+            w = w + self.bias[i] * mask
+        w[mask] = -1
         w = w.view(-1, k1 * k2)
         w, i = w.topk(k, dim=-1, sorted=False)
         i1 = torch.gather(i1, 1, i // k2)
         i2 = torch.gather(i2, 1, i % k2)
         i = i1 * self.pkm_base + i2
+        w = w * (i < self.num_latents)
+        i = i.clamp_max(self.num_latents - 1)
         return w.view(*orig_batch_size, k), i.reshape(*orig_batch_size, k)
 
     @property
@@ -120,7 +122,7 @@ class KroneckerLinear(nn.Module):
     def __init__(self,
             d_in: int, num_latents: int,
             in_group: int = 2, out_group: int = 4,
-            u: int = 4,
+            u: int = 4, lora_dim: float = 0.25,
             device: str | torch.device = "cpu",
             dtype: torch.dtype | None = None,
             ):
@@ -131,10 +133,11 @@ class KroneckerLinear(nn.Module):
         self.out_group = out_group
         self.u = u
         self.d_in = d_in
-        self.pre = nn.Linear(d_in, d_in, device=device, dtype=dtype)
+        self.lora_dim = int(d_in * lora_dim)
+        self.pre = nn.Linear(d_in, self.lora_dim, device=device, dtype=dtype)
         self.inner = nn.Parameter(torch.randn(out_group, u, in_group, dtype=dtype, device=device))
         self.outer = nn.Parameter(torch.randn(
-            num_latents // out_group, u, d_in // in_group,
+            num_latents // out_group, u, self.lora_dim // in_group,
             dtype=dtype, device=device))
         self.num_latents = num_latents        
     
@@ -153,7 +156,7 @@ class KroneckerLinear(nn.Module):
     @property
     def weight(self):
         mat = torch.einsum("yux,mun->ymxn", self.inner, self.outer)
-        mat = mat.reshape(self.num_latents, self.d_in)
+        mat = mat.reshape(self.num_latents, self.lora_dim)
         return mat @ self.pre.weight
 
 
@@ -198,7 +201,11 @@ class Sae(nn.Module):
             self.encoder = PKMLinear(d_in, self.num_latents, device=device, dtype=dtype, cfg=cfg)
             self.encoder._weight.bias.data.zero_()
         elif cfg.encoder_kron:
-            self.encoder = KroneckerLinear(d_in, self.num_latents, device=device, dtype=dtype)
+            self.encoder = KroneckerLinear(
+                d_in, self.num_latents,
+                in_group=cfg.kron_in_group, out_group=cfg.kron_out_group,
+                u=cfg.kron_u, lora_dim=cfg.kron_lora,
+                device=device, dtype=dtype)
         else:
             self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
             self.encoder.bias.data.zero_()

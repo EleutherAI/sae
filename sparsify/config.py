@@ -57,6 +57,9 @@ class SaeConfig(Serializable):
     kron_u: int = 4
     """Number of matrices to mix for the Kronecker product."""
     
+    kron_lora: float = 1.0
+    """How much to reduce the dimensionality of the input to the Kronecker product."""
+    
     decoder_xformers: bool = True
     """Xformers implementation for the decoder."""
 
