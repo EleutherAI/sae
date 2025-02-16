@@ -3,6 +3,7 @@ from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import cpu_count
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -29,6 +30,8 @@ class RunConfig(TrainConfig):
     )
     """Path to the dataset to use for training."""
 
+    subset: Optional[str] = None
+    """Subset of the dataset to use for training."""
     split: str = "train"
     """Dataset split to use for training."""
 
@@ -97,6 +100,7 @@ def load_artifacts(
             dataset = load_dataset(
                 args.dataset,
                 split=args.split,
+                name=args.subset,
                 # TODO: Maybe set this to False by default? But RPJ requires it.
                 trust_remote_code=True,
             )

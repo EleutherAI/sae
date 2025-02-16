@@ -29,6 +29,7 @@ class SaeConfig(Serializable):
     """Whether to use hashed lookup tables for the encoder weights."""
     
     # uv run python -m sparsify EleutherAI/pythia-160m togethercomputer/RedPajama-Data-1T-Sample --encoder_pkm=True --transcode=True --run_name pkm_saes/with_pkm_transcoder
+    # uv run python -m sparsify "HuggingFaceTB/SmolLM2-135M" "HuggingFaceFW/fineweb" --subset sample-10BT --transcode=True --skip_connection=True --layers 3 6 9
     encoder_pkm: bool = False
     """Whether to use Product Key Memory for the encoder weights."""
 
@@ -43,6 +44,18 @@ class SaeConfig(Serializable):
     
     pkm_init_scale: float = 1.0
     """Scale factor for PKM encoder initialization."""
+    
+    encoder_kron: bool = False
+    """Use Kronecker product for the encoder."""
+    
+    kron_in_group: int = 2
+    """Number of input groups for the Kronecker product."""
+    
+    kron_out_group: int = 4
+    """Number of output groups for the Kronecker product."""
+    
+    kron_u: int = 4
+    """Number of matrices to mix for the Kronecker product."""
     
     decoder_xformers: bool = True
     """Xformers implementation for the decoder."""

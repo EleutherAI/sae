@@ -26,8 +26,8 @@ def grad_pursuit_update_step(signal, weights, dictionary, eps=1e-3):
     return weights
 
 def grad_pursuit(signal, dictionary, target_l0):
-    if target_l0 < 0 or target_l0 >= dictionary.shape[0]:
-        raise ValueError(f"target_l0 must be in [0, {dictionary.shape[0]}), got {target_l0}")
+    if target_l0 < 0 or target_l0 > dictionary.shape[0]:
+        raise ValueError(f"target_l0 must be in [0, {dictionary.shape[0]}], got {target_l0}")
     weights = torch.zeros((signal.shape[0], dictionary.shape[0]), dtype=signal.dtype, device=signal.device)
     for i in range(target_l0):
         weights = grad_pursuit_update_step(signal, weights, dictionary)
@@ -41,6 +41,7 @@ class ITDAConfig:
     loss_threshold: float
     add_error: bool = False
     subtract_mean: bool = False
+    fvu_loss: bool = True
     start_size: int = 16
 
 
@@ -91,13 +92,20 @@ class ITDA(nn.Module):
             if self.config.subtract_mean:
                 x_reconstructed = x_reconstructed + self.mean_x
                 y_reconstructed = y_reconstructed + self.mean_y
+        if self.config.fvu_loss:
+            l2_loss = (y - y_reconstructed).pow(2).sum(-1)
+            total_variance = (y - y.mean(0)).pow(2).sum(-1).mean()
+            losses = l2_loss / total_variance
+        else:
+            losses = (y_reconstructed - y).pow(2).sum(-1)
         return ITDAOutput(
             weights=weights,
             indices=indices,
             x_reconstructed=x_reconstructed,
             y_reconstructed=y_reconstructed,
-            losses=(y_reconstructed - y).pow(2).sum(-1)
+            losses=losses
         )
+        
         
     @torch.inference_mode()
     def step(self, x, y):
@@ -114,15 +122,20 @@ class ITDA(nn.Module):
         else:
             added_x = x
             added_y = y
+            if self.config.subtract_mean:
+                added_x = added_x - self.mean_x
+                added_y = added_y - self.mean_y
         added_x = added_x[should_be_added]
         added_y = added_y[should_be_added]
         added_y = added_y / added_x.norm(dim=-1, keepdim=True)
         added_x = added_x / added_x.norm(dim=-1, keepdim=True)
         n_added = added_x.shape[0]
-        while self.dictionary_size + n_added > self.xs.shape[0]:
-            self.xs.data = torch.cat([self.xs, torch.empty_like(self.xs)])
-            self.ys.data = torch.cat([self.ys, torch.empty_like(self.xs)])
-        self.xs[self.dictionary_size:self.dictionary_size + n_added] = added_x
-        self.ys[self.dictionary_size:self.dictionary_size + n_added] = added_y
-        self.dictionary_size += n_added
+        if n_added:
+            while self.dictionary_size + n_added > self.xs.shape[0]:
+                self.xs.data = torch.cat([self.xs, torch.empty_like(self.xs)])
+                self.ys.data = torch.cat([self.ys, torch.empty_like(self.xs)])
+            self.xs[self.dictionary_size:self.dictionary_size + n_added] = added_x
+            self.ys[self.dictionary_size:self.dictionary_size + n_added] = added_y
+            self.dictionary_size += n_added
         return out_0
+    

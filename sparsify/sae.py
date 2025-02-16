@@ -116,6 +116,47 @@ class PKMLinear(nn.Module):
         return (w1 + w2).reshape(self.pkm_base * pkm_trim, self.d_in)[:self.num_latents] * torch.exp(self._scale)
 
 
+class KroneckerLinear(nn.Module):
+    def __init__(self,
+            d_in: int, num_latents: int,
+            in_group: int = 2, out_group: int = 4,
+            u: int = 4,
+            device: str | torch.device = "cpu",
+            dtype: torch.dtype | None = None,
+            ):
+        assert d_in % in_group == 0
+        assert num_latents % out_group == 0
+        super().__init__()
+        self.in_group = in_group
+        self.out_group = out_group
+        self.u = u
+        self.d_in = d_in
+        self.pre = nn.Linear(d_in, d_in, device=device, dtype=dtype)
+        self.inner = nn.Parameter(torch.randn(out_group, u, in_group, dtype=dtype, device=device))
+        self.outer = nn.Parameter(torch.randn(
+            num_latents // out_group, u, d_in // in_group,
+            dtype=dtype, device=device))
+        self.num_latents = num_latents        
+    
+    @torch.compile
+    def forward(self, x):
+        x = self.pre(x)
+        x = x.unflatten(-1, (x.shape[-1] // self.in_group, self.in_group))
+        x = torch.einsum("...nd,cud->...nuc", x, self.inner)
+        x = torch.einsum("...nuc,mun->...cm", x, self.outer)
+        return x.reshape(*x.shape[:-2], -1)
+
+    @torch.compile(mode="max-autotune")
+    def topk(self, x, k: int):
+        return self.forward(x).topk(k, dim=-1)
+    
+    @property
+    def weight(self):
+        mat = torch.einsum("yux,mun->ymxn", self.inner, self.outer)
+        mat = mat.reshape(self.num_latents, self.d_in)
+        return mat @ self.pre.weight
+
+
 class Sae(nn.Module):
     def __init__(
         self,
@@ -156,6 +197,8 @@ class Sae(nn.Module):
         elif cfg.encoder_pkm:
             self.encoder = PKMLinear(d_in, self.num_latents, device=device, dtype=dtype, cfg=cfg)
             self.encoder._weight.bias.data.zero_()
+        elif cfg.encoder_kron:
+            self.encoder = KroneckerLinear(d_in, self.num_latents, device=device, dtype=dtype)
         else:
             self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
             self.encoder.bias.data.zero_()
@@ -276,11 +319,12 @@ class Sae(nn.Module):
         """Select the top-k latents."""
         return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
 
+    @torch.compile
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
         if self.cfg.monet:
             return EncoderOutput(self.pre_acts(x), torch.arange(self.num_latents, device=x.device))
-        if self.cfg.encoder_pkm:
+        if self.cfg.encoder_pkm or self.cfg.encoder_kron:
             return self.encoder.topk(x, self.cfg.k)
         return self.select_topk(self.pre_acts(x))
 
@@ -288,7 +332,11 @@ class Sae(nn.Module):
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
         if self.cfg.decoder_xformers:
+            og_batch_size = top_acts.shape[:-1]
+            top_acts = top_acts.flatten(0, -2)
+            top_indices = top_indices.flatten(0, -2)
             y = xformers_embedding_bag(top_indices, self.W_dec, top_acts.to(torch.bfloat16))
+            y = y.view(*og_batch_size, -1)
         else:
             y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec

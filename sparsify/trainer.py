@@ -158,13 +158,18 @@ class SaeTrainer:
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
 
+        @torch.compile(fullgraph=False)
+        def optimizer_step():
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
         if self.cfg.log_to_wandb and rank_zero:
             try:
                 import wandb
 
                 wandb.init(
                     name=self.cfg.run_name,
-                    project="sae",
+                    project="optimized-encoder",
                     config=asdict(self.cfg),
                     save_code=True,
                 )
@@ -349,8 +354,7 @@ class SaeTrainer:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                optimizer_step()
                 self.lr_scheduler.step()
 
                 if self.cfg.sae.encoder_halut:
