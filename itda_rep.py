@@ -1,9 +1,10 @@
 #%%
-%env CUDA_VISIBLE_DEVICES=5
+%env CUDA_VISIBLE_DEVICES=7
 device = "cuda:0"
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
+# model_name = "HuggingFaceTB/SmolLM2-135M"
 model_name = "EleutherAI/pythia-160m"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
@@ -22,32 +23,51 @@ from itertools import islice
 import numpy as np
 import torch
 class ActivationLoader(object):
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, bs=16, msl=128):
         self.model, self.tokenizer = model, tokenizer
         self.ds = load_dataset("HuggingFaceFW/fineweb", split="train", name="sample-10BT")
+        self.bs = bs
+        self.msl = msl
     
     @torch.inference_mode()
-    def __call__(self, take_n, skip_n=0, bs=16, msl=128,
+    def __call__(self, take_n, skip_n=0,
                  hooks=None):
         for m in model.modules():
             m._forward_hooks = OrderedDict()
         cache = defaultdict(list)
         if hooks is not None:
+            main_module = getattr(self.model, "gpt_neox", getattr(self.model, "model", None))
             for layer_idx, module_name in hooks:
-                layer = self.model.gpt_neox.layers[layer_idx]
-                module = layer.mlp if module_name == "mlp" else 1/0
+                layer = main_module.layers[layer_idx]
+                module = (
+                    layer.mlp if module_name == "mlp" else 
+                    layer if module_name == "res" else
+                    1/0
+                )
                 module.register_forward_hook(
                     lambda m, i, o:
                         cache[(layer_idx, module_name)]
-                        .append((i[0].half(), o.half())))
-        for batch_idx, batch in enumerate(chunked(islice(self.ds, skip_n, skip_n+take_n), bs)):
+                        .append((
+                            (i if not isinstance(i, tuple) else i[0]),
+                            (o if not isinstance(o, tuple) else o[0])
+                        )))
+        for batch_idx, batch in enumerate(chunked(islice(self.ds, skip_n, skip_n+take_n), self.bs)):
             batch = self.tokenizer.batch_encode_plus(
                 [x["text"] for x in batch],
-                max_length=msl, padding=True, truncation=True,
+                max_length=self.msl, padding=True, truncation=True,
                 return_tensors="pt"
-            )["input_ids"].cuda()
-            self.model(batch, output_hidden_states=False, return_dict=False)
-            yield {k: v[0] for k, v in cache.items()}
+            )
+            input_ids = batch["input_ids"].cuda()
+            attention_mask = batch["attention_mask"].bool().cuda()
+            self.model(input_ids, output_hidden_states=False, return_dict=False)
+            yield {
+                k: tuple(
+                    t
+                    [..., 1:, :].contiguous()
+                    .reshape(-1, t.shape[-1])
+                    [attention_mask[..., 1:].ravel()]
+                    for t in v[0]
+                ) for k, v in cache.items()}
             cache.clear()
         for m in model.modules():
             m._forward_hooks = OrderedDict()
@@ -55,54 +75,75 @@ class ActivationLoader(object):
 # %%
 %load_ext autoreload
 %autoreload 2
-from itda import ITDAConfig, ITDA
+from sparsify.itda import ITDAConfig, ITDA
 import torch
 torch.set_grad_enabled(False)
 mlp_in_out_cache = []
 layer = 9
-loader = ActivationLoader(model, tokenizer)
+hook = "mlp"
+bs = 16
+msl = 128
+dtype = torch.float32
+loader = ActivationLoader(model, tokenizer, bs=bs, msl=msl)
 d_model = model.config.hidden_size
 add_error = False
 subtract_mean = True
+skip_connection = False
+preprocessing_batches = 64
 transcode = True
 itda_config = ITDAConfig(
     d_model=d_model,
     target_l0=32,
-    loss_threshold=0.3,
+    loss_threshold=0.4,
     add_error=add_error,
     subtract_mean=subtract_mean,
+    skip_connection=skip_connection,
+    preprocessing_steps=preprocessing_batches,
+    error_k=8,
 )
-itda = ITDA(itda_config).half().to(device)
+itda = ITDA(itda_config, dtype=dtype, device=device)
 losses = []
 dictionary_sizes = []
 take_n = 10_000
-bs = 16
+lim_dictionary_size = 50_000
 try:
-    for batch_idx, batch in (bar := tqdm(enumerate(loader(take_n=take_n, bs=bs, msl=msl, hooks=[(layer, "mlp")])), total=take_n//bs)):
-        x, y = batch[(layer, "mlp")]
+    for batch_idx, batch in (
+        bar := tqdm(enumerate(
+            loader(take_n=take_n, hooks=[(layer, hook)])),
+                    total=take_n//bs)):
+        x, y = batch[(layer, hook)]
         x, y = x.view(-1, d_model), y.view(-1, d_model)
-        loss = itda.step(x if transcode else y, y).losses.mean().item()
+        out = itda.step(x if transcode else y, y)
+        if out is None:
+            continue
+        loss = out.losses.mean().item()
         bar.set_postfix(
             loss=loss,
             dictionary_size=itda.dictionary_size
         )
         losses.append(loss)
         dictionary_sizes.append(itda.dictionary_size)
+        if itda.dictionary_size > lim_dictionary_size:
+            break
 except KeyboardInterrupt:
     pass
 #%%
 from matplotlib import pyplot as plt
 skip = 10
+plt.xlabel("Step")
+plt.ylabel("FVU")
 plt.loglog(np.arange(skip, len(losses)), losses[skip:])
 plt.xlim(skip, len(losses))
+# plt.ylim(0.1, 1.0)
 plt.show()
+plt.xlabel("Step")
+plt.ylabel("Dictionary size")
 plt.loglog(dictionary_sizes)
 plt.show()
 # %%
-msl = 128
 inputs, outputs = [], []
-for batch_idx, batch in enumerate(loader(take_n=100, skip_n=take_n, bs=bs, msl=msl, hooks=[(layer, "mlp")])):
-    x, y = batch[(layer, "mlp")]
+for batch_idx, batch in enumerate(loader(take_n=100, skip_n=take_n, hooks=[(layer, hook)])):
+    x, y = (x for x in batch[(layer, hook)])
     x, y = x.view(-1, d_model), y.view(-1, d_model)
     inputs.append(x)
     outputs.append(y)
@@ -113,8 +154,5 @@ total_variance = (outputs - outputs.mean(0)).pow(2).sum(-1).mean()
 fvu = l2_loss / total_variance
 fvu
 # %%
-outputs.shape
+itda.save_to_disk("checkpoints/itda/pythia-basic-transcoder")
 #%%
-dictionary_in.shape
-
-# %%
