@@ -500,7 +500,8 @@ class Trainer:
 
                 sae.save_to_disk(f"{path}/{name}")
 
-            torch.save({"num_tokens_since_fired": self.num_tokens_since_fired}, f"{path}/rank_{dist.get_rank()}_state.pt")
+            rank = 0 if rank_zero else dist.get_rank()
+            torch.save({"num_tokens_since_fired": self.num_tokens_since_fired}, f"{path}/rank_{rank}_state.pt")
 
         if rank_zero:
             torch.save(self.lr_scheduler.state_dict(), f"{path}/lr_scheduler.pt")
