@@ -52,6 +52,11 @@ class ITDAConfig:
     preprocessing_steps: int = 1
 
 
+
+def dictionary_size_transform(x):
+    return 2 ** ceil(max(4, log2(x)))
+
+
 @dataclass
 class ITDAOutput:
     weights: torch.Tensor
@@ -59,20 +64,35 @@ class ITDAOutput:
     x_reconstructed: torch.Tensor
     y_reconstructed: torch.Tensor
     losses: torch.Tensor
+    skip_y: torch.Tensor | None = None
 
 
 class ITDA(nn.Module):
-    def __init__(self, config: ITDAConfig, dtype=torch.float32, device=None):
+    def __init__(self, config: ITDAConfig,
+                 dtype=torch.float32, device=None,
+                 initial_size=None):
         super().__init__()
+        if initial_size is None:
+            initial_size = config.start_size
         self.xs = nn.Parameter(
-            torch.empty((config.start_size, config.d_model), dtype=dtype, device=device)
+            torch.empty((initial_size, config.d_model),
+                        dtype=dtype, device=device),
+            requires_grad=False
         )
         self.ys = nn.Parameter(
-            torch.empty((config.start_size, config.d_model), dtype=dtype, device=device)
+            torch.empty((initial_size, config.d_model),
+                        dtype=dtype, device=device),
+            requires_grad=False
         )
         self.device = device
-        self.mean_x, self.mean_y = None, None
-        self.weight = None
+        self.mean_x, self.mean_y = (
+            nn.Parameter(torch.zeros(config.d_model, dtype=dtype, device=device),
+                         requires_grad=False) for _ in range(2)
+        )
+        self.weight = nn.Parameter(
+            torch.empty((config.d_model, config.d_model),
+                        dtype=dtype, device=device),
+            requires_grad=False)
         self.weight_data = []
         self.steps = 0
         self.dictionary_size = 0
@@ -95,7 +115,7 @@ class ITDA(nn.Module):
             )
     
     @staticmethod
-    def load_from_disk(path, device: str | torch.device = "cpu"):
+    def load_from_disk(path, device: str | torch.device | None = "cpu"):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         with open(path / "cfg.json") as f:
@@ -105,7 +125,8 @@ class ITDA(nn.Module):
             itda_config.pop("steps")
             cfg = ITDAConfig(**itda_config)
         
-        itda = ITDA(cfg, device=device)
+        itda = ITDA(cfg, device=device,
+                    initial_size=dictionary_size_transform(config["dictionary_size"]))
         load_model(itda, str(path / "sae.safetensors"),
                    strict=False, device=device)
         itda.dictionary_size = config["dictionary_size"]
@@ -115,9 +136,9 @@ class ITDA(nn.Module):
     def forward(self, x, y, target_l0=None):
         assert x.ndim == y.ndim == 2
         x, y = x.to(self.dtype), y.to(self.dtype)
-        if self.config.subtract_mean:
-            assert self.mean_x is not None
-            assert self.mean_y is not None
+        assert self.steps >= self.config.preprocessing_steps
+        if self.config.skip_connection:
+            skip_y = (x - self.mean_x) @ self.weight
         if self.dictionary_size == 0:
             if self.config.subtract_mean:
                 x_reconstructed = self.mean_x.broadcast_to(*x.shape[:-1], -1)
@@ -138,6 +159,8 @@ class ITDA(nn.Module):
             if self.config.subtract_mean:
                 x_reconstructed = x_reconstructed + self.mean_x
                 y_reconstructed = y_reconstructed + self.mean_y
+        if self.config.skip_connection:
+            y_reconstructed = y_reconstructed + skip_y
         if self.config.fvu_loss:
             l2_loss = (y - y_reconstructed).pow(2).sum(-1)
             total_variance = (y - self.mean_y).pow(2).sum(-1).mean()
@@ -149,7 +172,8 @@ class ITDA(nn.Module):
             indices=indices,
             x_reconstructed=x_reconstructed,
             y_reconstructed=y_reconstructed,
-            losses=losses
+            losses=losses,
+            skip_y=skip_y if self.config.skip_connection else None
         )
        
     @torch.inference_mode()
@@ -158,16 +182,24 @@ class ITDA(nn.Module):
         x, y = x.to(self.dtype), y.to(self.dtype)
         if self.steps < self.config.preprocessing_steps:
             if self.steps == 0 or self.mean_x is None or self.mean_y is None:
-                self.mean_x = torch.zeros_like(x[0])
-                self.mean_y = torch.zeros_like(y[0])
-            self.mean_x.mul_(self.steps / (self.steps + 1)).add_(x.mean(0) / (self.steps + 1))
-            self.mean_y.mul_(self.steps / (self.steps + 1)).add_(y.mean(0) / (self.steps + 1))
+                self.mean_x = nn.Parameter(torch.zeros_like(x[0]), requires_grad=False)
+                self.mean_y = nn.Parameter(torch.zeros_like(y[0]), requires_grad=False)
+            self.mean_x.data.mul_(self.steps / (self.steps + 1)).add_(x.mean(0) / (self.steps + 1))
+            self.mean_y.data.mul_(self.steps / (self.steps + 1)).add_(y.mean(0) / (self.steps + 1))
             self.steps += 1
             if self.config.skip_connection:
                 self.weight_data.append((x, y))
             return None
         if self.steps == self.config.preprocessing_steps and self.config.skip_connection:
-            raise NotImplementedError("Skip connection not implemented")
+            assert self.config.subtract_mean
+            all_x = torch.cat([x for x, _ in self.weight_data])
+            all_y = torch.cat([y for _, y in self.weight_data])
+            x_train = all_x - self.mean_x
+            y_train = all_y - self.mean_y
+            weight = torch.linalg.lstsq(x_train, y_train).solution
+            self.weight.data = weight.clone()
+            del self.weight_data
+        self.steps += 1
         out_0 = self(x, y)
         should_be_added = out_0.losses > self.config.loss_threshold
         if self.config.add_error:
@@ -184,6 +216,8 @@ class ITDA(nn.Module):
             if self.config.subtract_mean:
                 added_x = added_x - self.mean_x
                 added_y = added_y - self.mean_y
+            if self.config.skip_connection:
+                added_y = added_y - out_0.skip_y
         added_x = added_x[should_be_added]
         added_y = added_y[should_be_added]
         added_y = added_y / added_x.norm(dim=-1, keepdim=True)
@@ -192,7 +226,7 @@ class ITDA(nn.Module):
         if n_added:
             if self.dictionary_size + n_added > self.xs.shape[0]:
                 old_xs, old_ys = self.xs, self.ys
-                new_size = 2 ** ceil(max(4, log2(self.dictionary_size + n_added)))
+                new_size = dictionary_size_transform(self.dictionary_size + n_added)
                 self.xs = nn.Parameter(
                     torch.empty((new_size, self.config.d_model), device=self.device, dtype=self.dtype)
                 )

@@ -77,6 +77,7 @@ class ActivationLoader(object):
 %autoreload 2
 from sparsify.itda import ITDAConfig, ITDA
 import torch
+import wandb
 torch.set_grad_enabled(False)
 mlp_in_out_cache = []
 layer = 9
@@ -88,13 +89,13 @@ loader = ActivationLoader(model, tokenizer, bs=bs, msl=msl)
 d_model = model.config.hidden_size
 add_error = False
 subtract_mean = True
-skip_connection = False
+skip_connection = True
 preprocessing_batches = 64
 transcode = True
 itda_config = ITDAConfig(
     d_model=d_model,
     target_l0=32,
-    loss_threshold=0.4,
+    loss_threshold=0.3,
     add_error=add_error,
     subtract_mean=subtract_mean,
     skip_connection=skip_connection,
@@ -102,6 +103,19 @@ itda_config = ITDAConfig(
     error_k=8,
 )
 itda = ITDA(itda_config, dtype=dtype, device=device)
+run_name = "pythia" if "pythia" in model_name else "smollm"
+run_name += f"-l{layer}_{hook}"
+if transcode:
+    run_name += "-transcoder"
+if add_error:
+    run_name += "-error"
+if subtract_mean:
+    run_name += "-mean"
+if skip_connection:
+    run_name += "-skip"
+run_name += f"-k{itda_config.target_l0}"
+run = wandb.init(project="itda", entity="eleutherai", name=run_name)
+run.config.update(itda_config)
 losses = []
 dictionary_sizes = []
 take_n = 10_000
@@ -123,10 +137,15 @@ try:
         )
         losses.append(loss)
         dictionary_sizes.append(itda.dictionary_size)
+        wandb.log({
+            "loss": loss,
+            "dictionary_size": itda.dictionary_size
+        }, step=batch_idx)
         if itda.dictionary_size > lim_dictionary_size:
             break
 except KeyboardInterrupt:
     pass
+wandb.finish()
 #%%
 from matplotlib import pyplot as plt
 skip = 10
@@ -154,5 +173,8 @@ total_variance = (outputs - outputs.mean(0)).pow(2).sum(-1).mean()
 fvu = l2_loss / total_variance
 fvu
 # %%
-itda.save_to_disk("checkpoints/itda/pythia-basic-transcoder")
+itda.save_to_disk(f"checkpoints/itda/{run_name}")
+#%%
+itda = ITDA.load_from_disk(f"checkpoints/itda/{run_name}", device="cuda:0")
+itda(x, x)
 #%%
