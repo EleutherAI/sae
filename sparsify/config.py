@@ -62,7 +62,7 @@ class TrainConfig(Serializable):
 
     k_decay_steps: int = 0
     """Number of steps over which to decay the number of active latents. Starts at
-    input width * 2 and decays to k."""
+    input width * 1.5 and decays to k."""
 
     auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""

@@ -115,7 +115,7 @@ class Trainer:
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
 
-        self.initial_k = list(input_widths.values())[0] * 2
+        self.initial_k = round(list(input_widths.values())[0] * 1.5)
         self.final_k = self.cfg.sae.k
 
     def load_state(self, path: str):
