@@ -115,6 +115,10 @@ class Trainer:
             self.optimizer, cfg.lr_warmup_steps, num_examples // cfg.batch_size
         )
 
+        num_latents = list(self.saes.values())[0].num_latents
+        self.initial_k = min(num_latents, round(list(input_widths.values())[0] * 10))
+        self.final_k = self.cfg.sae.k
+
     def load_state(self, path: str):
         """Load the trainer state from disk."""
         device = self.model.device
@@ -152,6 +156,15 @@ class Trainer:
         for name, sae in self.saes.items():
             load_model(sae, f"{path}/{name}/sae.safetensors", device=str(device))
 
+    def get_current_k(self) -> int:
+        """Get the current k value based on a linear decay schedule."""
+        if self.global_step >= self.cfg.k_decay_steps:
+            return self.final_k
+        
+        progress = self.global_step / self.cfg.k_decay_steps
+        return round(self.initial_k * (1 - progress) + self.final_k * progress)
+    
+    
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
         torch.set_float32_matmul_precision("high")
@@ -236,6 +249,10 @@ class Trainer:
             # Remember the inputs if we're training a transcoder
             if self.cfg.sae.transcode:
                 input_dict[name] = inputs.flatten(0, 1)
+
+        k = self.get_current_k()
+        for name, sae in self.saes.items():
+            sae.cfg.k = k
 
         for batch in dl:
             input_dict.clear()
@@ -347,6 +364,10 @@ class Trainer:
                 self.optimizer.zero_grad()
                 self.lr_scheduler.step()
 
+                k = self.get_current_k()
+                for name, sae in self.saes.items():
+                    sae.cfg.k = k
+
                 ###############
                 with torch.no_grad():
                     # Update the dead feature mask
@@ -394,6 +415,8 @@ class Trainer:
                         info.update({k: v for out in outputs for k, v in out.items()})
 
                     if rank_zero:
+                        info["k"] = k
+
                         wandb.log(info, step=step)
 
                 if (step + 1) % self.cfg.save_every == 0:
